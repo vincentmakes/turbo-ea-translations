@@ -83,10 +83,10 @@ class BuildIndex(unittest.TestCase):
         write_pack(self.root, "nl")
         env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                    GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid",
-                   GIT_COMMITTER_DATE="2026-01-02T03:04:05+00:00", GIT_CONFIG_GLOBAL=os.devnull)
+                   GIT_COMMITTER_DATE="2026-01-02T05:04:05+02:00", GIT_CONFIG_GLOBAL=os.devnull)
         for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "x"]):
             subprocess.run(["git", *args], cwd=self.root, env=env, check=True)
-        self.assertEqual(self.build()["languages"][0]["updated"], "2026-01-02T03:04:05+00:00")
+        self.assertEqual(self.build()["languages"][0]["updated"], "2026-01-02T03:04:05Z")
 
 
 class LsRemote(unittest.TestCase):

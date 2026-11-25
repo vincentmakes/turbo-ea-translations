@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -35,15 +36,19 @@ EnglishLoader = Callable[[str], "tuple[str, dict[str, dict[str, str]]] | None"]
 
 
 def last_update(repo: Path, rel: str) -> str | None:
-    """Commit date (ISO 8601) of the last commit touching ``rel``."""
+    """Commit date of the last commit touching ``rel``, as UTC
+    ``YYYY-MM-DDTHH:MM:SSZ`` — formatted here from the Unix timestamp, so it
+    depends on neither the committer's timezone nor the git version."""
     try:
         out = subprocess.run(
-            ["git", "log", "-1", "--format=%cI", "--", rel],
+            ["git", "log", "-1", "--format=%ct", "--", rel],
             cwd=repo, capture_output=True, text=True, timeout=60, check=True,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
-    return out or None
+    if not out.isdigit():
+        return None
+    return datetime.fromtimestamp(int(out), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def read_regular_file(path: Path, limit: int) -> bytes | None:
