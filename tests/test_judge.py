@@ -42,7 +42,8 @@ class FakeApi:
                       MERGED: merge_tree if merge_tree is not None else head_tree}
         self.pr = {
             "number": 7, "state": "open", "draft": False, "changed_files": len(files),
-            "head": {"sha": HEAD}, "base": {"ref": "main"}, "user": {"login": "alice"},
+            "head": {"sha": HEAD, "repo": {"owner": {"login": "alice"}}}, "base": {"ref": "main"},
+            "user": {"login": "alice", "id": 1},
         }
         self.pr.update(pr or {})
         self.reviews = list(reviews)
@@ -202,13 +203,13 @@ class Merge(Base):
         self.assertEqual(merge_body["sha"], HEAD)
         self.assertEqual(merge_body["merge_method"], "squash")
         maint = next(b for m, p, b in api.calls if p == "packs/nl/MAINTAINERS")
-        self.assertEqual(packrules.parse_maintainers(maint), ["alice"])
+        self.assertEqual(packrules.parse_maintainers(maint), [packrules.Maintainer("alice", 1)])
         self.assertIn(("POST", "/repos/o/r/actions/workflows/registry.yml/dispatches"), methods)
 
     def test_existing_language_non_maintainer_waits(self):
         data = pack_bytes()
         old = pack_bytes(instructions="old")
-        main = {"packs/nl/pack.json": ("100644", "blob", old), "packs/nl/MAINTAINERS": ("100644", "blob", b"bob\n")}
+        main = {"packs/nl/pack.json": ("100644", "blob", old), "packs/nl/MAINTAINERS": ("100644", "blob", b"bob 2\n")}
         api = FakeApi(files=[], head_tree={"packs/nl/pack.json": ("100644", "blob", data)}, main_tree=main)
         self.assertEqual(self.merge(api, data)[0], 0)
         self.assertEqual(api.calls, [])
@@ -216,7 +217,7 @@ class Merge(Base):
     def test_existing_language_maintainer_merges_without_new_maintainers(self):
         data = pack_bytes()
         main = {"packs/nl/pack.json": ("100644", "blob", pack_bytes(instructions="old")),
-                "packs/nl/MAINTAINERS": ("100644", "blob", b"alice\n")}
+                "packs/nl/MAINTAINERS": ("100644", "blob", b"alice 1\n")}
         api = FakeApi(files=[], head_tree={"packs/nl/pack.json": ("100644", "blob", data)}, main_tree=main)
         self.assertEqual(self.merge(api, data)[0], 0)
         paths = [p for _, p, _ in api.calls]
@@ -226,9 +227,9 @@ class Merge(Base):
     def test_maintainer_approval_merges(self):
         data = pack_bytes()
         main = {"packs/nl/pack.json": ("100644", "blob", pack_bytes(instructions="old")),
-                "packs/nl/MAINTAINERS": ("100644", "blob", b"bob\n")}
+                "packs/nl/MAINTAINERS": ("100644", "blob", b"bob 2\n")}
         api = FakeApi(files=[], head_tree={"packs/nl/pack.json": ("100644", "blob", data)}, main_tree=main,
-                      reviews=[{"user": {"login": "bob"}, "state": "APPROVED", "commit_id": HEAD}])
+                      reviews=[{"user": {"login": "bob", "id": 2}, "state": "APPROVED", "commit_id": HEAD}])
         self.merge(api, data)
         self.assertIn("/repos/o/r/pulls/7/merge", [p for _, p, _ in api.calls])
 
@@ -241,9 +242,9 @@ class Merge(Base):
     def test_pack_changed_on_main_since_branching(self):
         data = pack_bytes()
         main = {"packs/nl/pack.json": ("100644", "blob", pack_bytes(instructions="newer")),
-                "packs/nl/MAINTAINERS": ("100644", "blob", b"alice\n")}
+                "packs/nl/MAINTAINERS": ("100644", "blob", b"alice 1\n")}
         base = {"packs/nl/pack.json": ("100644", "blob", pack_bytes(instructions="older")),
-                "packs/nl/MAINTAINERS": ("100644", "blob", b"alice\n")}
+                "packs/nl/MAINTAINERS": ("100644", "blob", b"alice 1\n")}
         api = FakeApi(files=[], head_tree={"packs/nl/pack.json": ("100644", "blob", data)},
                       main_tree=main, base_tree=base)
         self.assertEqual(self.merge(api, data)[0], 0)

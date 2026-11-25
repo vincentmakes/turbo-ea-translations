@@ -343,31 +343,52 @@ def header_problems(pack: Mapping[str, Any], folder_code: str | None) -> list[st
 # ---------------------------------------------------------------------------
 
 
-def parse_maintainers(text: str) -> list[str]:
-    """Logins from a MAINTAINERS file: one per line, ``#`` starts a comment,
-    blank lines ignored, a leading ``@`` tolerated. A line that is not a valid
-    login is ignored (it can never match a real author)."""
-    logins: list[str] = []
+@dataclass(frozen=True)
+class Maintainer:
+    login: str
+    #: GitHub's numeric user id. A login can be renamed and then registered by
+    #: someone else; the id cannot. ``None`` for a line written without one.
+    user_id: int | None = None
+
+    def is_user(self, login: Any, user_id: Any) -> bool:
+        if not isinstance(login, str) or login.lower() != self.login.lower():
+            return False
+        return self.user_id is None or (isinstance(user_id, int) and user_id == self.user_id)
+
+
+def parse_maintainers(text: str) -> list[Maintainer]:
+    """Maintainers from a MAINTAINERS file: one per line as ``login`` or
+    ``login <numeric user id>``; ``#`` starts a comment, blank lines are
+    ignored, a leading ``@`` is tolerated. A malformed line is ignored (it can
+    never match a real user)."""
+    found: list[Maintainer] = []
     seen: set[str] = set()
     for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if line.startswith("@"):
-            line = line[1:]
-        if is_login(line) and line.lower() not in seen:
-            seen.add(line.lower())
-            logins.append(line)
-    return logins
+        parts = raw.split("#", 1)[0].split()
+        if not parts or len(parts) > 2:
+            continue
+        login = parts[0][1:] if parts[0].startswith("@") else parts[0]
+        user_id: int | None = None
+        if len(parts) == 2:
+            if not parts[1].isascii() or not parts[1].isdigit() or len(parts[1]) > 12:
+                continue
+            user_id = int(parts[1])
+        if is_login(login) and login.lower() not in seen:
+            seen.add(login.lower())
+            found.append(Maintainer(login, user_id))
+    return found
 
 
-def maintainers_file(code: str, login: str) -> str:
-    if code_problem(code) is not None or not is_login(login):
-        raise ValueError("bad code or login")
+def maintainers_file(code: str, login: str, user_id: int) -> str:
+    if code_problem(code) is not None or not is_login(login) or not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("bad code, login or user id")
     return (
-        f"# Maintainers of the {code} language pack: GitHub logins, one per line.\n"
+        f"# Maintainers of the {code} language pack, one per line: GitHub login and numeric user id\n"
+        "# (https://api.github.com/users/<login> shows the id; a line without an id matches the login only).\n"
         "# A pull request from a maintainer merges automatically once it passes the checks;\n"
         "# any other change to this pack needs an approving review from a maintainer.\n"
         "# Changes to this file are made by the repository owner.\n"
-        f"{login}\n"
+        f"{login} {user_id}\n"
     )
 
 
@@ -395,8 +416,10 @@ class Decision:
 def decide(
     *,
     author: Any,
+    author_id: Any,
+    head_owner: Any,
     language_exists: bool,
-    maintainers: list[str],
+    maintainers: list[Maintainer],
     reviews: Iterable[Mapping[str, Any]],
     head_sha: str,
 ) -> Decision:
@@ -404,22 +427,31 @@ def decide(
 
     * New language (no ``packs/<code>/`` on the default branch): merge; the
       author becomes its first maintainer.
-    * Existing language, author listed in MAINTAINERS: merge.
+    * Existing language, author listed in MAINTAINERS (login and, when
+      recorded, user id): merge.
     * Existing language, otherwise: merge once a listed maintainer other than
       the author has approved this exact head commit and no listed maintainer's
-      latest review requests changes; else wait."""
-    if not is_login(author):
-        return Decision("skip", "the author's login is not a plain GitHub user login; left for the owner")
+      latest review requests changes; else wait.
+
+    The first two need the PR's branch to live in the author's own fork
+    (``head_owner``): otherwise whoever can push to that branch would get their
+    commits merged on the author's standing."""
+    if not is_login(author) or not isinstance(author_id, int):
+        return Decision("skip", "the author is not a plain GitHub user account; left for the owner")
+    own_branch = isinstance(head_owner, str) and head_owner.lower() == author.lower()
     if not language_exists:
+        if not own_branch:
+            return Decision("wait", "a new language must come from a branch in the author's own fork; "
+                            "left for the owner")
         return Decision("merge", "new language: merges automatically, the author becomes its maintainer", True)
-    listed = {m.lower() for m in maintainers}
-    if author.lower() in listed:
+    if own_branch and any(m.is_user(author, author_id) for m in maintainers):
         return Decision("merge", f"{author} maintains this language")
-    if not listed:
+    if not maintainers:
         return Decision("wait", "this language has no maintainer listed; the owner has to review it")
     approvers: list[str] = []
     for login, review in latest_reviews(reviews).items():
-        if login not in listed or login == author.lower():
+        user = review.get("user") or {}
+        if login == author.lower() or not any(m.is_user(login, user.get("id")) for m in maintainers):
             continue
         if review.get("state") == "CHANGES_REQUESTED":
             return Decision("wait", f"maintainer {login} requested changes")
@@ -428,7 +460,7 @@ def decide(
     if approvers:
         return Decision("merge", "approved by maintainer " + ", ".join(sorted(approvers)))
     return Decision("wait", "waiting for an approving review of the latest commit from a maintainer: "
-                    + ", ".join(sorted(maintainers)))
+                    + ", ".join(sorted(m.login for m in maintainers)))
 
 
 # ---------------------------------------------------------------------------

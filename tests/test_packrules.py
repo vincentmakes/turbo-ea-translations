@@ -163,40 +163,66 @@ class ReadingPacks(unittest.TestCase):
         self.assertEqual(problems(), [])
 
 
+M = packrules.Maintainer
+IDS = {"alice": 1, "bob": 2, "zed": 26, "mallory": 13}
+
+
 class Maintainers(unittest.TestCase):
     def test_parse(self):
-        text = "# comment\nalice\n\n@Bob  # trailing\nalice\nnot a login\n$(id)\ncarol-x\n"
-        self.assertEqual(packrules.parse_maintainers(text), ["alice", "Bob", "carol-x"])
+        text = ("# comment\nalice 1\n\n@Bob  # trailing\nalice\nnot a login\n$(id)\ncarol-x 33\n"
+                "dave 1x\neve 1 2\nfrank ١٢\n")
+        self.assertEqual(packrules.parse_maintainers(text), [M("alice", 1), M("Bob"), M("carol-x", 33)])
 
     def test_file_roundtrip(self):
-        text = packrules.maintainers_file("nl", "alice")
-        self.assertEqual(packrules.parse_maintainers(text), ["alice"])
-        with self.assertRaises(ValueError):
-            packrules.maintainers_file("nl", "a;b")
-        with self.assertRaises(ValueError):
-            packrules.maintainers_file("../x", "alice")
+        text = packrules.maintainers_file("nl", "alice", 1)
+        self.assertEqual(packrules.parse_maintainers(text), [M("alice", 1)])
+        for args in (("nl", "a;b", 1), ("../x", "alice", 1), ("nl", "alice", None), ("nl", "alice", "1")):
+            with self.assertRaises(ValueError):
+                packrules.maintainers_file(*args)
+
+    def test_id_pins_the_account(self):
+        self.assertTrue(M("alice", 1).is_user("Alice", 1))
+        self.assertFalse(M("alice", 1).is_user("alice", 999))  # renamed login re-registered
+        self.assertTrue(M("alice").is_user("alice", 999))
+        self.assertFalse(M("alice").is_user("alicex", 1))
 
 
-def review(login, state, commit=HEAD):
-    return {"user": {"login": login}, "state": state, "commit_id": commit}
+def review(login, state, commit=HEAD, user_id=None):
+    return {"user": {"login": login, "id": user_id or IDS.get(login, 0)}, "state": state, "commit_id": commit}
 
 
 class Decide(unittest.TestCase):
     def d(self, **kw):
-        args = dict(author="zed", language_exists=True, maintainers=["alice", "bob"], reviews=[], head_sha=HEAD)
+        args = dict(author="zed", author_id=26, head_owner=None, language_exists=True,
+                    maintainers=[M("alice", 1), M("bob", 2)], reviews=[], head_sha=HEAD)
         args.update(kw)
+        if args["head_owner"] is None:
+            args["head_owner"] = args["author"]
         return packrules.decide(**args)
 
     def test_new_language_merges(self):
         decision = self.d(language_exists=False, maintainers=[])
         self.assertEqual((decision.action, decision.new_language), ("merge", True))
 
+    def test_new_language_from_someone_elses_branch_waits(self):
+        self.assertEqual(self.d(language_exists=False, maintainers=[], head_owner="mallory").action, "wait")
+
     def test_bad_author_login(self):
         self.assertEqual(self.d(author="evil[bot]", language_exists=False).action, "skip")
         self.assertEqual(self.d(author="a;rm -rf /").action, "skip")
+        self.assertEqual(self.d(author_id=None, language_exists=False).action, "skip")
 
     def test_maintainer_author_merges(self):
-        self.assertEqual(self.d(author="Alice").action, "merge")
+        self.assertEqual(self.d(author="Alice", author_id=1).action, "merge")
+
+    def test_reused_login_is_not_the_maintainer(self):
+        self.assertEqual(self.d(author="alice", author_id=999).action, "wait")
+        self.assertEqual(self.d(reviews=[review("bob", "APPROVED", user_id=999)]).action, "wait")
+
+    def test_maintainer_on_someone_elses_branch_needs_approval(self):
+        self.assertEqual(self.d(author="alice", author_id=1, head_owner="mallory").action, "wait")
+        decision = self.d(author="alice", author_id=1, head_owner="mallory", reviews=[review("bob", "APPROVED")])
+        self.assertEqual(decision.action, "merge")
 
     def test_other_author_waits(self):
         self.assertEqual(self.d().action, "wait")

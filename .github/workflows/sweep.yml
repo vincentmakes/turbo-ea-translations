@@ -29,6 +29,12 @@ permissions: {}
 
 jobs:
   resolve:
+    # workflow_run matches workflows by name; a fork could add its own
+    # "Review relay". Only the real file counts (it would only cost a re-judge).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.path == '.github/workflows/review-relay.yml' &&
+       github.event.workflow_run.event == 'pull_request_review')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

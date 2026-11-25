@@ -19,6 +19,9 @@
 #   only, never to the step that runs turbo-ea's validator. Only `merge` can
 #   write, it runs only after `validate` succeeded for this same head SHA, and
 #   it re-checks the live PR head before merging that exact SHA.
+# * The validator is always the one of the latest turbo-ea release (else
+#   main); the pack's app_version only selects which English text it is
+#   compared with, so a pack cannot pick an older, more lenient validator.
 name: Judge
 
 on:
@@ -84,6 +87,13 @@ jobs:
       needs.validate.outputs.head_sha == inputs.head_sha
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # One merge at a time in the whole repository, so each one re-reads the
+    # default branch after the previous merge (the "pack changed since this PR
+    # branched" check then sees it) and the same PR is never merged twice. A
+    # run that gets cancelled while pending is picked up by the daily sweep.
+    concurrency:
+      group: merge-default-branch
+      cancel-in-progress: false
     permissions:
       contents: write       # merge, write MAINTAINERS for a new language
       pull-requests: write  # merge

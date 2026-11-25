@@ -102,7 +102,7 @@ def pr_inputs() -> tuple[str, str]:
 # resolve
 # ---------------------------------------------------------------------------
 
-SWEEP_LIMIT = 50
+SWEEP_LIMIT = 100
 
 
 def cmd_resolve() -> int:
@@ -122,7 +122,10 @@ def cmd_resolve() -> int:
         if event == "workflow_run" and not packrules.is_sha(wanted):
             return fail("workflow_run without a head SHA")
         default = api.default_branch()
-        for pr in api.paginate(api.r("/pulls"), limit=300, state="open", base=default):
+        # Least recently updated first, so a PR waiting for a long time is
+        # never crowded out of the sweep by newer ones.
+        for pr in api.paginate(api.r("/pulls"), limit=1000, state="open", base=default,
+                               sort="updated", direction="asc"):
             sha = pr.get("head", {}).get("sha")
             if not packrules.is_sha(sha) or pr.get("draft"):
                 continue
@@ -216,21 +219,19 @@ def cmd_validate(pack_file: Path, work: Path) -> int:
     if not packrules.is_version(app_version):
         return fail("app_version is not a plain x.y.z version")
     try:
-        label, sha = turbo_ea.resolve(app_version, env("TURBO_EA_VALIDATOR_SHA"))
-        validator, english = turbo_ea.fetch(sha, work / "turbo-ea")
+        got = turbo_ea.prepare(app_version, work, env("TURBO_EA_VALIDATOR_SHA"))
     except (RuntimeError, ValueError, OSError) as exc:
         return fail(str(exc), title="Could not get turbo-ea's validator")
-    code, output = turbo_ea.run_validator(validator, pack_file, english)
+    code, output = turbo_ea.run_validator(got["validator"], pack_file, got["english"])
+    origin = (f"validator from turbo-ea {got['validator_label']} ({str(got['validator_sha'])[:12]}), "
+              f"English text from {got['english_label']} ({str(got['english_sha'])[:12]})")
     with untrusted_output():
-        print(f"turbo-ea {label} ({sha})")
+        print(origin)
         print(output)
     lines = output.strip().splitlines()
     shown = "\n".join(lines[:200]) + ("\n… (truncated; full report in the job log)" if len(lines) > 200 else "")
     verdict = "✅ valid" if code == 0 else "❌ invalid"
-    summary(
-        f"### Validation against turbo-ea `{esc(label)}` (`{sha[:12]}`): {verdict}\n\n"
-        f"<pre>{esc(shown)}</pre>\n"
-    )
+    summary(f"### Validation: {verdict}\n\n{esc(origin)}\n\n<pre>{esc(shown)}</pre>\n")
     if code == 1:
         summary(
             "Each line is `namespace  key  reason`. See CONTRIBUTING.md for what each reason means; "
@@ -261,14 +262,18 @@ def cmd_merge() -> int:
     if pr.get("draft"):
         summary(f"PR #{number} is a draft; mark it ready for review to have it merged.")
         return 0
-    author = pr.get("user", {}).get("login", "")
+    user = pr.get("user") or {}
+    author, author_id = user.get("login", ""), user.get("id")
+    head_repo = pr["head"].get("repo") or {}
+    head_owner = (head_repo.get("owner") or {}).get("login")
     default_sha = api.branch_sha(default)
     exists = api.tree_entry(default_sha, f"packs/{code}") is not None
     maintainers_text = api.file_text(default_sha, f"packs/{code}/MAINTAINERS") or ""
     maintainers = packrules.parse_maintainers(maintainers_text)
     reviews = api.paginate(api.r(f"/pulls/{number}/reviews"), limit=500)
     decision = packrules.decide(
-        author=author, language_exists=exists, maintainers=maintainers, reviews=reviews, head_sha=head_sha
+        author=author, author_id=author_id, head_owner=head_owner, language_exists=exists,
+        maintainers=maintainers, reviews=reviews, head_sha=head_sha,
     )
     if decision.action != "merge":
         summary(f"### ⏳ Not merged yet\n\n{esc(decision.reason)}\n")
@@ -312,7 +317,7 @@ def cmd_merge() -> int:
         try:
             api.put_file(
                 f"packs/{code}/MAINTAINERS",
-                packrules.maintainers_file(code, author).encode("utf-8"),
+                packrules.maintainers_file(code, author, author_id).encode("utf-8"),
                 f"Make {author} the maintainer of the {code} language pack (#{number})",
                 default,
                 None,

@@ -74,10 +74,10 @@ pull request; it reads your file as data. It checks:
   at most 60 characters), the English name (letters, spaces, brackets, dashes),
   `rtl` true or false, and `source_hashes` made of 12-character hashes;
 * then **Turbo EA's own validator** (`language_pack.py`, the same code the app
-  runs on import), against the English text of the Turbo EA version your pack
-  was exported from (the release tag of `app_version`; Turbo EA's `main` branch
-  if that version is not released yet). It reports one line per problem:
-  `namespace  key  reason`.
+  runs on import, taken from the latest Turbo EA release) against the English
+  text of the Turbo EA version your pack was exported from (the release tag of
+  `app_version`; Turbo EA's `main` branch if that version is not released yet).
+  It reports one line per problem: `namespace  key  reason`.
 
 | reason | what it means |
 |---|---|
@@ -118,11 +118,16 @@ Nobody from the Turbo EA project reviews packs. Instead:
 
 * **New language:** once the check passes, the pull request merges
   automatically, and **you become the language's maintainer**: your GitHub login
-  is written to `packs/<code>/MAINTAINERS`.
+  and numeric user id are written to `packs/<code>/MAINTAINERS` (the id keeps
+  the role with your account even if a login is renamed and re-registered).
 * **Update from a maintainer:** merges automatically once the check passes.
+* Both need the pull request to come from a branch in **your own fork** —
+  which is what the web interface does for you. A pull request from a branch
+  someone else owns waits for a maintainer's approval instead (or, for a new
+  language, for the repository owner).
 * **Update from anyone else:** waits until one of the language's maintainers
   submits an **approving review** of the latest commit. It then merges
-  automatically (usually within minutes; a daily sweep catches anything missed).
+  automatically (usually within minutes; at the latest at the daily sweep).
   A maintainer's "Request changes" blocks it until they approve. If you push new
   commits, an earlier approval no longer counts — the new version needs one.
 * If the pack changed on the default branch after you opened your pull request,

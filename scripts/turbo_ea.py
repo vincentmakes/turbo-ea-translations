@@ -1,9 +1,11 @@
 """Fetch turbo-ea's own pack validator and English locale files, and run it.
 
-Only ever from https://github.com/vincentmakes/turbo-ea, at a commit resolved
-from a strictly validated version (tag ``v<x.y.z>`` or ``<x.y.z>``, else
-``main``), or at a full commit SHA the repository owner pins. The checkout is
-sparse: the validator file and ``frontend/src/i18n/locales/en/*.json`` only.
+Only ever from https://github.com/vincentmakes/turbo-ea: the validator from the
+latest ``v<x.y.z>`` release that has it (else ``main``), the English files at
+the release tag of the pack's strictly validated ``app_version`` (``v<x.y.z>``
+or ``<x.y.z>``, else ``main``), or both at a full commit SHA the repository
+owner pins. The checkout is sparse: the validator file and
+``frontend/src/i18n/locales/en/*.json`` only.
 
 The validator runs as a separate ``python -I -S`` process with an empty
 environment (no token, no runner variables) in an empty working directory.
@@ -82,6 +84,65 @@ def resolve(app_version: str, pinned_sha: str = "") -> tuple[str, str]:
     candidates = packrules.turbo_ea_refs(app_version)  # raises on a bad version
     patterns = [p for ref in candidates for p in (ref, ref + "^{}")]
     return pick_ref(app_version, parse_ls_remote(_git("ls-remote", REPO_URL, *patterns)))
+
+
+def latest_release(output: str) -> tuple[str, str] | None:
+    """``(tag, commit sha)`` of the highest ``v<x.y.z>`` tag in ``git ls-remote
+    --tags`` output, or ``None``."""
+    refs = parse_ls_remote(output)
+    best: tuple[tuple[int, int, int], str, str] | None = None
+    for ref, sha in refs.items():
+        tag = ref.removeprefix("refs/tags/")
+        if not ref.startswith("refs/tags/v") or not packrules.is_version(tag[1:]):
+            continue
+        key = tuple(int(p) for p in tag[1:].split("."))
+        if best is None or key > best[0]:
+            best = (key, tag, sha)  # type: ignore[assignment]
+    return None if best is None else (best[1], best[2])
+
+
+def prepare(app_version: str, work: Path, pinned_sha: str = "") -> dict[str, object]:
+    """Fetch what a pack is checked with:
+
+    * the **validator** from the latest turbo-ea release that has it, else
+      ``main`` — never from the pack's own ``app_version``, so a pack cannot
+      choose an older, more lenient validator;
+    * the **English files** of the pack's ``app_version`` (its release tag, else
+      ``main``), the text the pack was translated from.
+
+    ``pinned_sha`` (set by the repository owner) replaces both, for testing an
+    unreleased turbo-ea. Returns labels, SHAs and paths."""
+    if pinned_sha:
+        label, sha = resolve(app_version, pinned_sha)
+        validator, english = fetch(sha, work / sha)
+        return {"validator_label": label, "validator_sha": sha, "validator": validator,
+                "english_label": label, "english_sha": sha, "english": english}
+    english_label, english_sha = resolve(app_version)
+    fetched: dict[str, Path] = {}
+
+    def checkout(sha: str) -> Path:
+        if sha not in fetched:
+            fetch(sha, work / sha, need_validator=False)
+            fetched[sha] = work / sha
+        return fetched[sha]
+
+    candidates: list[tuple[str, str]] = []
+    release = latest_release(_git("ls-remote", "--tags", REPO_URL, "refs/tags/v*"))
+    if release is not None:
+        candidates.append(release)
+    main = parse_ls_remote(_git("ls-remote", REPO_URL, "refs/heads/main")).get("refs/heads/main")
+    if main:
+        candidates.append(("main", main))
+    for label, sha in candidates:
+        if (checkout(sha) / VALIDATOR_PATH).is_file():
+            english = checkout(english_sha) / ENGLISH_PATH
+            if not english.is_dir() or not any(english.glob("*.json")):
+                raise RuntimeError(f"turbo-ea {english_label} has no English locale files")
+            return {"validator_label": label, "validator_sha": sha, "validator": checkout(sha) / VALIDATOR_PATH,
+                    "english_label": english_label, "english_sha": english_sha, "english": english}
+    raise RuntimeError(
+        f"no turbo-ea release or main has {VALIDATOR_PATH} yet (language packs are not released yet)"
+    )
 
 
 def fetch(sha: str, dest: Path, *, need_validator: bool = True) -> tuple[Path, Path]:

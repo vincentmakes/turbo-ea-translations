@@ -101,6 +101,17 @@ class LsRemote(unittest.TestCase):
         self.assertEqual(turbo_ea.pick_ref("2.214.0", refs), ("v2.214.0", "3" * 40))
         self.assertEqual(turbo_ea.pick_ref("2.215.0", refs), ("main", "1" * 40))
 
+    def test_latest_release_picks_highest_version(self):
+        out = (
+            f"{'1' * 40}\trefs/tags/v2.9.0\n"
+            f"{'2' * 40}\trefs/tags/v2.10.0\n"
+            f"{'3' * 40}\trefs/tags/v2.10.0^{{}}\n"
+            f"{'4' * 40}\trefs/tags/v9.0.0-rc1\n"
+            f"{'5' * 40}\trefs/tags/vlatest\n"
+        )
+        self.assertEqual(turbo_ea.latest_release(out), ("v2.10.0", "3" * 40))
+        self.assertIsNone(turbo_ea.latest_release(""))
+
     def test_bad_version_never_resolves(self):
         with self.assertRaises(ValueError):
             turbo_ea.pick_ref("main", {})

@@ -7,9 +7,10 @@
 It applies this repository's rules (size, JSON shape, header, "share" mode,
 folder name = language code) and then runs turbo-ea's own validator against the
 English files of the Turbo EA version the pack was exported from. Without
-``--turbo-ea`` the validator and English files are downloaded (needs ``git``)
-from github.com/vincentmakes/turbo-ea at the matching release tag, or ``main``
-when the version is not released yet. Standard library only; Python 3.10+.
+``--turbo-ea`` both are downloaded (needs ``git``) from
+github.com/vincentmakes/turbo-ea: the validator of the latest release, the
+English files at the pack's release tag (``main`` when not released yet).
+``--sha`` uses one turbo-ea commit for both. Standard library only; 3.10+.
 
 Exit status: 0 valid, 1 invalid, 2 the check could not run.
 """
@@ -76,9 +77,11 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"no {turbo_ea.VALIDATOR_PATH} in {args.turbo_ea}")
                     return 2
             else:
-                label, sha = turbo_ea.resolve(pack["app_version"], args.sha)
-                print(f"fetching turbo-ea {label} ({sha[:12]}) …")
-                validator, english = turbo_ea.fetch(sha, Path(work) / "turbo-ea")
+                print("fetching turbo-ea's validator and English files …")
+                got = turbo_ea.prepare(pack["app_version"], Path(work), args.sha)
+                validator, english = got["validator"], got["english"]
+                label = f"{got['english_label']}"
+                print(f"validator: turbo-ea {got['validator_label']}; English text: {got['english_label']}")
         except (RuntimeError, ValueError, OSError) as exc:
             print(f"cannot get turbo-ea's validator: {exc}")
             return 2
