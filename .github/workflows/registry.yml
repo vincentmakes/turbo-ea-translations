@@ -1,0 +1,46 @@
+# Regenerate index.json from the packs on the default branch.
+#
+# Started by judge.yml after every automatic merge (workflow_dispatch: merges
+# made with the workflow token do not trigger `push` workflows), by pushes to
+# packs/ (the owner merging or editing by hand) and by hand.
+#
+# Runs only on the default branch's own content: the packs there were validated
+# before they merged, and are still read as data only (regular files, size and
+# depth capped). The build step has no token; only the publish step can write,
+# and only index.json, through the contents API.
+name: Registry
+
+on:
+  push:
+    branches: [main]
+    paths: ["packs/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: registry
+  cancel-in-progress: false
+
+jobs:
+  index:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Clone the default branch (no credentials)
+        env:
+          REPO: ${{ github.repository }}
+        run: git clone -q --no-tags "https://github.com/$REPO.git" "$RUNNER_TEMP/repo"
+
+      - name: Build index.json (no token)
+        run: >-
+          python3 "$RUNNER_TEMP/repo/scripts/build_index.py" build
+          --repo "$RUNNER_TEMP/repo" --out "$RUNNER_TEMP/index.json"
+
+      - name: Publish index.json if it changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/repo/scripts/build_index.py" publish --file "$RUNNER_TEMP/index.json"

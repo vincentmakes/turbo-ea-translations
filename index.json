@@ -1,0 +1,7 @@
+{
+  "format": "turbo-ea-language-pack-index",
+  "format_version": 1,
+  "repository": "vincentmakes/turbo-ea-translations",
+  "pack_url": "https://raw.githubusercontent.com/vincentmakes/turbo-ea-translations/{ref}/{path}",
+  "languages": []
+}

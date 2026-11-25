@@ -1,0 +1,108 @@
+# Judge one language-pack pull request and merge it when the policy allows.
+#
+# Called only by pack-check.yml (pull_request_target) and sweep.yml
+# (workflow_run / schedule / workflow_dispatch). All of those run the workflow
+# definitions and scripts of the DEFAULT BRANCH with the base repository's
+# token, so this file is written on the assumption that every pull-request value
+# is hostile:
+#
+# * Nothing from the PR head is checked out, imported or executed. The judging
+#   scripts are fetched from this repository at GITHUB_SHA (the base branch),
+#   and the pack's bytes are read through the API as a git blob of the exact
+#   head SHA, then written to a file that is only ever parsed as JSON.
+# * No PR-controlled value is interpolated into a `run:` script: the only
+#   `${{ }}` expressions in this file are in `env:`, `with:` and `if:`, and the
+#   values that reach the scripts are re-validated there (PR number = digits,
+#   SHAs = 40 hex, language code = the code pattern, version = x.y.z).
+# * No cache and no artifact is used.
+# * `validate` has read-only permissions; its token is given to the API step
+#   only, never to the step that runs turbo-ea's validator. Only `merge` can
+#   write, it runs only after `validate` succeeded for this same head SHA, and
+#   it re-checks the live PR head before merging that exact SHA.
+name: Judge
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        type: string
+        required: true
+      head_sha:
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      kind: ${{ steps.inspect.outputs.kind }}
+      code: ${{ steps.inspect.outputs.code }}
+      blob_sha: ${{ steps.inspect.outputs.blob_sha }}
+      head_sha: ${{ steps.inspect.outputs.head_sha }}
+    steps:
+      - name: Get the judging scripts from the base branch
+        env:
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          git init -q "$RUNNER_TEMP/judge"
+          git -C "$RUNNER_TEMP/judge" fetch -q --depth 1 "https://github.com/$REPO.git" "$BASE_SHA"
+          git -C "$RUNNER_TEMP/judge" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+
+      - name: Inspect the pull request (files, path, pack header)
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: python3 "$RUNNER_TEMP/judge/scripts/judge.py" inspect --out "$RUNNER_TEMP/pack"
+
+      - name: Validate with turbo-ea's language_pack.py (no token)
+        if: steps.inspect.outputs.kind == 'contribution'
+        env:
+          APP_VERSION: ${{ steps.inspect.outputs.app_version }}
+          # Optional, set by the owner under Settings > Variables: a full
+          # turbo-ea commit SHA to validate against instead of the release tag.
+          TURBO_EA_VALIDATOR_SHA: ${{ vars.TURBO_EA_VALIDATOR_SHA }}
+        run: >-
+          python3 "$RUNNER_TEMP/judge/scripts/judge.py" validate
+          --pack "$RUNNER_TEMP/pack/pack.json" --work "$RUNNER_TEMP/work"
+
+  merge:
+    name: merge
+    needs: validate
+    if: >-
+      needs.validate.result == 'success' &&
+      needs.validate.outputs.kind == 'contribution' &&
+      needs.validate.outputs.head_sha == inputs.head_sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write       # merge, write MAINTAINERS for a new language
+      pull-requests: write  # merge
+      actions: write        # start registry.yml (index.json)
+    steps:
+      - name: Get the judging scripts from the base branch
+        env:
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          git init -q "$RUNNER_TEMP/judge"
+          git -C "$RUNNER_TEMP/judge" fetch -q --depth 1 "https://github.com/$REPO.git" "$BASE_SHA"
+          git -C "$RUNNER_TEMP/judge" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+
+      - name: Apply the maintainer policy and merge the validated SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          CODE: ${{ needs.validate.outputs.code }}
+          BLOB_SHA: ${{ needs.validate.outputs.blob_sha }}
+        run: python3 "$RUNNER_TEMP/judge/scripts/judge.py" merge

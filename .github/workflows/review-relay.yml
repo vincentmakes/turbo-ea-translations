@@ -1,0 +1,22 @@
+# Fires when someone reviews a pull request, so that sweep.yml (workflow_run)
+# re-judges it: a maintainer's approval is what lets a change to an existing
+# language merge.
+#
+# This workflow runs in the pull request's context with a read-only token and no
+# secrets, and does nothing but exist. sweep.yml takes only the head SHA from
+# this run, looks the open PR up itself and judges it from scratch, so even a PR
+# that rewrites this file cannot influence the outcome.
+name: Review relay
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: echo "Review recorded; the Sweep workflow re-judges this pull request."
