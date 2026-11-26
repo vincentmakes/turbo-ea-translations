@@ -1,0 +1,41 @@
+# The check every pull request gets.
+#
+# Why pull_request_target is safe here: it runs THIS file and judge.yml as they
+# are on the default branch, never the versions in the pull request, so a PR
+# that edits .github/ or scripts/ cannot change its own judge (and such a PR is
+# never auto-merged: judge.py only merges a PR whose sole change is one
+# packs/<code>/pack.json). The job never checks out the PR; it reads the PR's
+# file list and the pack's bytes through the API at the event's head SHA. The
+# only event values used are the PR number and head SHA, passed as inputs (no
+# `run:` script here at all). No secrets are passed to the called workflow.
+name: Pack check
+
+on:
+  pull_request_target:
+    # `edited` covers a PR retargeted to main (and re-judges on a title edit,
+    # which is harmless).
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    # pull_request_target runs the workflow file of the PR's BASE branch: only
+    # main's (reviewed) definitions may ever run with a write token.
+    branches: [main]
+
+permissions: {}
+
+# One run per PR at a time. Never cancel a running one: it could be between
+# reserving MAINTAINERS and merging (harmless, the next run finishes it, but
+# pointless). A run for an outdated head simply stops at its head-SHA check.
+concurrency:
+  group: pack-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  judge:
+    uses: ./.github/workflows/judge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      issues: write
+    with:
+      pr_number: ${{ format('{0}', github.event.pull_request.number) }}
+      head_sha: ${{ github.event.pull_request.head.sha }}
