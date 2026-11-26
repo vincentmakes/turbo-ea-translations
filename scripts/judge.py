@@ -9,7 +9,10 @@ sets with ``env:``, never from interpolated script text):
               Needs a read-only token.
 ``validate``  fetch turbo-ea's validator and English files for the pack's
               app_version and run it on that file. No token.
-``merge``     re-check everything against the live PR and default branch, apply
+``decide``    check everything against the live PR and default branch, apply the
+              maintainer policy, and ask for a review (one edited comment per PR)
+              when one is needed. Merges nothing.
+``merge``     under the repository-wide lock, re-check everything again, apply
               the maintainer policy and merge that exact SHA. Needs write.
 
 Nothing from the pull request is ever executed, imported or checked out.
@@ -139,7 +142,7 @@ def cmd_resolve() -> int:
         if not packrules.is_sha(wanted):
             return fail("workflow_run without a head SHA")
         default = api.default_branch()
-        found = api.get(api.r(f"/commits/{wanted}/pulls")) or []
+        found = api.paginate(api.r(f"/commits/{wanted}/pulls"), limit=100)
         if not found:  # not every fork commit is indexed: fall back to a scan
             found = api.paginate(api.r("/pulls"), limit=1000, state="open", base=default)
         for pr in found:
@@ -201,6 +204,20 @@ def check_head(api: Any, pr: dict[str, Any], default_sha: str, head_sha: str):
     return verdict, entry, compare
 
 
+def language_exists(api: Any, commit_sha: str, code: str) -> bool:
+    """A language exists when its ``pack.json`` is on the default branch. A
+    MAINTAINERS file alone (a reservation whose merge did not happen) does not
+    make it exist: the next attempt is judged as a new language again."""
+    return api.tree_entry(commit_sha, f"packs/{code}/pack.json") is not None
+
+
+def open_prs_of(api: Any, default: str, author_id: Any) -> int | None:
+    prs, complete = api.paginate_complete(api.r("/pulls"), limit=1000, state="open", base=default)
+    if not complete:
+        return None
+    return sum(1 for pr in prs if (pr.get("user") or {}).get("id") == author_id)
+
+
 def cmd_inspect(out_dir: Path) -> int:
     number, head_sha = pr_inputs()
     api = client()
@@ -228,6 +245,11 @@ def cmd_inspect(out_dir: Path) -> int:
                 "It is left to the repository owner and is never merged automatically.")
         return 0
     assert verdict.code is not None and entry is not None
+    author_id = (pr.get("user") or {}).get("id")
+    count = open_prs_of(api, default, author_id)
+    if count is None or count > packrules.MAX_OPEN_PRS_PER_AUTHOR:
+        return fail(f"the author has more than {packrules.MAX_OPEN_PRS_PER_AUTHOR} open pull requests here; "
+                    "close some (or wait until they are merged) and push again")
     data = api.blob(entry["sha"])
     if packrules.git_blob_sha(data) != entry["sha"] or len(data) != int(entry.get("size") or 0):
         return fail("the pack's content does not match its git object id")
@@ -239,7 +261,7 @@ def cmd_inspect(out_dir: Path) -> int:
     if problems:
         return fail("\n".join(problems))
     author = (pr.get("user") or {}).get("login", "")
-    exists = api.tree_entry(default_sha, f"packs/{verdict.code}") is not None
+    exists = language_exists(api, default_sha, verdict.code)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "pack.json").write_bytes(data)
     set_output("kind", "contribution")
@@ -267,9 +289,10 @@ VERDICTS = {0: "✅ valid", 1: "❌ invalid"}
 
 
 def cmd_validate(pack_file: Path, work: Path) -> int:
-    """Exit 0 only when turbo-ea's validator exits 0. Its exit 1 is
-    "invalid"; anything else (2 = unreadable input, a crash, a timeout) is
-    reported as "could not run" and also fails the check."""
+    """Exit 0 only when turbo-ea's validator exits 0, the ``instructions``
+    are the export's own text, and a new language reaches the minimum
+    coverage. The validator's exit 1 is "invalid"; anything else (2 =
+    unreadable input, a crash, a timeout) is "could not run" and fails too."""
     import turbo_ea
 
     app_version = env("APP_VERSION")
@@ -298,33 +321,67 @@ def cmd_validate(pack_file: Path, work: Path) -> int:
         )
     if code != 0:
         return 1
+    pack = packrules.parse_pack_bytes(pack_file.read_bytes())
+    if "instructions" in pack:
+        try:
+            expected = turbo_ea.expected_instructions(Path(str(got["english_validator"])),
+                                                      pack["locale"]["english_name"])
+        except (RuntimeError, ValueError, OSError) as exc:
+            return fail(str(exc), title="Could not check the instructions")
+        if pack["instructions"] != expected:
+            return fail('"instructions" must be exactly the text Turbo EA writes into the export; '
+                        "export the pack again instead of editing it")
     return check_coverage(pack_file, Path(str(got["english"])), str(got["english_label"]))
 
 
 def check_coverage(pack_file: Path, english_dir: Path, english_label: str) -> int:
     """Report the pack's coverage of the English text it was made from, and
-    refuse a new language below :data:`packrules.MIN_NEW_LANGUAGE_COVERAGE`."""
+    refuse a new language below :data:`packrules.MIN_NEW_LANGUAGE_COVERAGE`.
+    Values identical to the English text do not count toward the minimum."""
     import turbo_ea
 
     pack = packrules.parse_pack_bytes(pack_file.read_bytes())
     stats = packrules.pack_stats(pack, turbo_ea.read_english(english_dir))
-    coverage = float(stats.get("coverage", 0.0))
+    coverage = float(stats.get("coverage_differing", 0.0))
     set_output("coverage", f"{coverage:.1f}")
+    set_output("identical", str(int(stats.get("identical_to_english", 0))))
     summary(
         f"### Coverage\n\n{stats['translated']} of {stats['english_strings']} interface strings of "
-        f"{esc(english_label)} ({coverage:.1f}%), {stats['metamodel_strings']} metamodel labels; "
-        f"{stats['identical_to_english']} translations are identical to the English text.\n"
+        f"{esc(english_label)} carry a value; {stats['identical_to_english']} of them are identical to the "
+        f"English text, so **{coverage:.1f}%** count as translated. {stats['metamodel_strings']} metamodel "
+        "labels.\n"
     )
-    if env("NEW_LANGUAGE") == "true" and coverage < packrules.MIN_NEW_LANGUAGE_COVERAGE:
+    if env("NEW_LANGUAGE") == "true" and not coverage >= packrules.MIN_NEW_LANGUAGE_COVERAGE:
         return fail(f"a new language needs at least {packrules.MIN_NEW_LANGUAGE_COVERAGE:.0f}% of the interface "
-                    f"strings; this pack has {coverage:.1f}%. Translate more in Turbo EA, export again and "
-                    "push the new file.", title="Not enough of the interface translated")
+                    f"strings translated (values copied from English do not count); this pack has "
+                    f"{coverage:.1f}%. Translate more in Turbo EA, export again and push the new file.",
+                    title="Not enough of the interface translated")
     return 0
 
 
 # ---------------------------------------------------------------------------
-# merge
+# decide and merge
 # ---------------------------------------------------------------------------
+
+HALT_TITLE = "[automerge halted]"
+BOT_LOGIN = "github-actions[bot]"
+
+
+def halted(api: Any) -> str | None:
+    """Why automatic merging is switched off, or ``None``: the owner set the
+    repository variable ``AUTOMERGE_HALTED``, or a post-merge check failed and
+    opened a halt issue that is still open (closing it resumes merging)."""
+    if env("AUTOMERGE_HALTED").strip():
+        return "automatic merging is halted by the repository variable AUTOMERGE_HALTED"
+    issues, complete = api.paginate_complete(api.r("/issues"), limit=1000, state="open", creator=BOT_LOGIN)
+    if not complete:
+        return "could not read the list of open issues; not merging"
+    for issue in issues:
+        user = issue.get("user") or {}
+        if ("pull_request" not in issue and user.get("login") == BOT_LOGIN
+                and str(issue.get("title", "")).startswith(HALT_TITLE)):
+            return f"automatic merging is halted until issue #{int(issue.get('number', 0))} is closed"
+    return None
 
 
 def within_daily_limits(api: Any, author: str, code: str) -> str | None:
@@ -350,86 +407,69 @@ def within_daily_limits(api: Any, author: str, code: str) -> str | None:
     return None
 
 
-COMMENT_MARKER = "<!-- turbo-ea-translations:review-request:{sha} -->"
-
-
-def ask_for_review(api: Any, number: str, head_sha: str, decision: Any) -> None:
-    """Comment once per head commit, mentioning who has to approve. Never
-    fatal: the wait is reported in the summary either way."""
-    import gh_api
-
-    marker = COMMENT_MARKER.format(sha=head_sha)
-    try:
-        comments, complete = api.paginate_complete(api.r(f"/issues/{number}/comments"), limit=1000)
-        if not complete or any(marker in str(c.get("body", "")) and
-                               (c.get("user") or {}).get("login") == "github-actions[bot]" for c in comments):
-            return
-        body = packrules.waiting_comment(number, head_sha, decision, marker)
-        api.request("POST", api.r(f"/issues/{number}/comments"), body={"body": body})
-        summary("Asked " + ", ".join(f"<code>{esc(login)}</code>" for login in decision.ask) + " for a review.")
-    except (gh_api.ApiError, OSError, ValueError) as exc:
-        summary(f"Could not post the review request comment: <pre>{esc(exc)}</pre>")
-
-
 def wait(reason: str) -> int:
     summary(f"### ⏳ Not merged yet\n\n<pre>{esc(reason)}</pre>\n")
     return 0
 
 
-def reserve_maintainer(api: Any, code: str, author: str, author_id: int, number: str, default: str) -> str | None:
-    """Write ``packs/<code>/MAINTAINERS`` for a new language BEFORE merging.
-
-    Done first so a failure leaves nothing half-done: if this write fails the
-    PR is simply not merged (the next run retries); if it succeeds and the
-    merge then fails, the next run sees the author as the maintainer and
-    merges. Returns an error, or ``None``."""
+def ask_for_review(api: Any, number: str, head_sha: str, decision: Any) -> None:
+    """Keep ONE comment per PR that mentions who has to approve: posted the
+    first time, edited (not re-posted) for later commits. Never fatal."""
     import gh_api
 
-    path = f"packs/{code}/MAINTAINERS"
-    content = packrules.maintainers_file(code, author, author_id)
+    details = ""
     try:
-        api.put_file(path, content.encode("utf-8"),
-                     f"Reserve the {code} language pack for {author} (#{number})", default, None)
+        coverage = float(env("COVERAGE"))
+        identical = int(env("IDENTICAL") or "0")
+        details = (f"Coverage: **{coverage:.1f}%** of the interface strings translated "
+                   f"({identical} values are identical to the English text and do not count).")
+    except ValueError:
+        pass
+    try:
+        body = packrules.waiting_comment(head_sha, decision, details)
+        comments, complete = api.paginate_complete(api.r(f"/issues/{number}/comments"), limit=1000)
+        if not complete:
+            return
+        mine = [c for c in comments if (c.get("user") or {}).get("login") == BOT_LOGIN
+                and packrules.REVIEW_REQUEST_MARKER in str(c.get("body", ""))]
+        if mine:
+            if mine[0].get("body") == body:
+                return
+            api.request("PATCH", api.r(f"/issues/comments/{int(mine[0]['id'])}"), body={"body": body})
+        else:
+            api.request("POST", api.r(f"/issues/{number}/comments"), body={"body": body})
+        summary("Asked " + ", ".join(f"<code>{esc(login)}</code>" for login in decision.ask) + " for a review.")
+    except (gh_api.ApiError, OSError, ValueError, KeyError, TypeError) as exc:
+        summary(f"Could not post the review request comment: <pre>{esc(exc)}</pre>")
+
+
+def locale_of(api: Any, commit_sha: str, code: str) -> dict[str, Any] | None:
+    entry = api.tree_entry(commit_sha, f"packs/{code}/pack.json")
+    if entry is None or entry.get("type") != "blob" or int(entry.get("size") or 0) > packrules.MAX_PACK_BYTES:
         return None
-    except gh_api.ApiError as exc:
-        # The write may have been applied before the error came back.
-        current = api.file_text(api.branch_sha(default), path)
-        if current == content:
-            return None
-        return f"could not write {path}: {exc}"
+    try:
+        locale = packrules.parse_pack_bytes(api.blob(entry["sha"])).get("locale")
+    except packrules.PackError:
+        return None
+    return locale if isinstance(locale, dict) else None
 
 
-def verify_merge(api: Any, merge_sha: Any, parent_sha: str, code: str, blob_sha: str) -> str | None:
-    """Why the merge commit is not exactly "the default branch plus this one
-    pack file", or ``None``: its only parent is ``parent_sha`` and, level by
-    level, only ``packs`` / ``<code>`` / ``pack.json`` differ, the last being
-    the validated blob."""
-    if not packrules.is_sha(merge_sha):
-        return "GitHub returned no merge commit"
-    if api.commit_parents(merge_sha) != [parent_sha]:
-        return "the merge commit's parent is not the default branch commit it was checked against"
-    for path, expected in (("", "packs"), ("packs", code), (f"packs/{code}", "pack.json")):
-        before = api.tree_listing(parent_sha, path) or []
-        after = api.tree_listing(merge_sha, path) or []
-        changed = packrules.differing_entries(before, after)
-        if changed != {expected}:
-            where = path or "the repository root"
-            return f"in {where}, the merge changed {sorted(changed)[:10]} instead of only {expected!r}"
-    entry = api.tree_entry(merge_sha, f"packs/{code}/pack.json") or {}
-    if entry.get("sha") != blob_sha or entry.get("mode") != packrules.MODE_REGULAR:
-        return "the merged pack is not the validated file"
-    return None
+class Plan:
+    """What :func:`evaluate` found for a PR that should merge now."""
+
+    def __init__(self, **kw: Any):
+        self.__dict__.update(kw)
 
 
-def cmd_merge() -> int:
-    import gh_api
-
-    number, head_sha = pr_inputs()
-    code, blob_sha = env("CODE"), env("BLOB_SHA")
-    if packrules.code_problem(code) is not None or not packrules.is_sha(blob_sha):
-        raise SystemExit("CODE / BLOB_SHA missing or malformed")
+def evaluate(api: Any, number: str, head_sha: str, code: str, blob_sha: str, *, comment: bool) -> Plan | int:
+    """Every check before a merge, against the live PR and default branch:
+    returns a :class:`Plan` when the PR should be merged now, else the exit
+    status after reporting why not (and, with ``comment``, asking whoever has
+    to approve). Writes nothing else."""
     path = f"packs/{code}/pack.json"
-    api = client()
+    stop = halted(api)
+    if stop:
+        return wait(stop)
     pr = api.get(api.r(f"/pulls/{number}"))
     repo = api.get(api.r(""))
     default = api.default_branch()  # validated branch name
@@ -454,9 +494,14 @@ def cmd_merge() -> int:
     if verdict.kind != "contribution" or verdict.path != path or (entry or {}).get("sha") != blob_sha:
         return fail("the PR's content is not the file that was validated", title="Not merged")
 
-    exists = api.tree_entry(default_sha, f"packs/{code}") is not None
+    exists = language_exists(api, default_sha, code)
+    locale_changed = False
+    if exists:
+        current, proposed = locale_of(api, default_sha, code), locale_of(api, head_sha, code)
+        locale_changed = current is None or proposed is None or any(
+            current.get(k) != proposed.get(k) for k in ("name", "english_name", "rtl"))
     maintainers, ignored = packrules.parse_maintainers(
-        api.file_text(default_sha, f"packs/{code}/MAINTAINERS") or "")
+        api.file_text(default_sha, f"packs/{code}/MAINTAINERS") or "") if exists else ([], 0)
     if ignored:
         summary(f"⚠️ packs/{esc(code)}/MAINTAINERS has {ignored} line(s) without a valid "
                 "<code>login user-id</code>; they are ignored.")
@@ -466,18 +511,18 @@ def cmd_merge() -> int:
     decision = packrules.decide(
         author=author, author_id=author_id, head_owner=head_owner, language_exists=exists,
         maintainers=maintainers, reviews=reviews, head_sha=head_sha, owner_id=owner_id,
-        owner_login=owner_login,
+        owner_login=owner_login, locale_changed=locale_changed,
     )
     if decision.action != "merge":
-        if decision.ask:
+        if comment and decision.ask:
             ask_for_review(api, number, head_sha, decision)
         return wait(decision.reason)
     if decision.new_language:
         try:
             coverage = float(env("COVERAGE"))
         except ValueError:
-            coverage = -1.0
-        if coverage < packrules.MIN_NEW_LANGUAGE_COVERAGE:
+            coverage = float("nan")
+        if not coverage >= packrules.MIN_NEW_LANGUAGE_COVERAGE:  # NaN fails too
             return wait(f"a new language needs at least {packrules.MIN_NEW_LANGUAGE_COVERAGE:.0f}% coverage "
                         "measured by this run's validation")
     limit = within_daily_limits(api, author, code)
@@ -491,35 +536,153 @@ def cmd_merge() -> int:
         return wait(f"the {code} pack changed on {default} after this PR was branched; rebase the branch "
                     "on the current version (or open a new PR from it) so the checks run on the file "
                     "that would actually be merged")
+    return Plan(pr=pr, default=default, author=author, author_id=author_id, owner_login=owner_login,
+                decision=decision)
 
+
+def cmd_decide() -> int:
+    """The read-mostly half: decide, and ask for reviews. Outputs
+    ``action=merge`` only when the merge job (which repeats every check under
+    the repository-wide lock) should run."""
+    number, head_sha = pr_inputs()
+    code, blob_sha = env("CODE"), env("BLOB_SHA")
+    if packrules.code_problem(code) is not None or not packrules.is_sha(blob_sha):
+        raise SystemExit("CODE / BLOB_SHA missing or malformed")
+    set_output("action", "wait")
+    result = evaluate(client(), number, head_sha, code, blob_sha, comment=True)
+    if isinstance(result, Plan):
+        set_output("action", "merge")
+        summary(f"Ready to merge: {esc(result.decision.reason)}")
+        return 0
+    return result
+
+
+def reserve_maintainer(api: Any, code: str, author: str, author_id: int, number: str, default: str) -> str | None:
+    """Write ``packs/<code>/MAINTAINERS`` for a new language BEFORE merging.
+
+    If this write fails the PR is not merged (the next run retries). If it
+    succeeds and the merge then fails, nothing is granted: the language only
+    exists once its pack.json is on the default branch, so the next attempt
+    still needs the owner's approval and the minimum coverage. A reservation
+    for another author is never overwritten. Returns an error, or ``None``."""
+    import gh_api
+
+    path = f"packs/{code}/MAINTAINERS"
+    content = packrules.maintainers_file(code, author, author_id)
+    current = api.file_text(api.branch_sha(default), path)
+    if current is not None:
+        if packrules.parse_maintainers(current)[0] == packrules.parse_maintainers(content)[0]:
+            return None
+        return f"{path} already exists for someone else; left for the owner"
+    try:
+        api.put_file(path, content.encode("utf-8"),
+                     f"Reserve the {code} language pack for {author} (#{number})", default, None)
+        return None
+    except gh_api.ApiError as exc:
+        # The write may have been applied before the error came back.
+        if api.file_text(api.branch_sha(default), path) == content:
+            return None
+        return f"could not write {path}: {exc}"
+
+
+def verify_merge(api: Any, merge_sha: Any, code: str, blob_sha: str) -> str | None:
+    """Why the merge commit is not exactly "its parent plus this one pack
+    file", or ``None``: it has exactly one parent and, level by level, only
+    ``packs`` / ``<code>`` / ``pack.json`` differ from that parent, the last
+    being the validated blob. (Compared with the actual parent, so an index
+    commit landing just before the merge is not a false alarm.)"""
+    if not packrules.is_sha(merge_sha):
+        return "GitHub returned no merge commit"
+    parents = api.commit_parents(merge_sha)
+    if len(parents) != 1 or not packrules.is_sha(parents[0]):
+        return "the merge commit does not have exactly one parent"
+    parent = parents[0]
+    for path, expected in (("", "packs"), ("packs", code), (f"packs/{code}", "pack.json")):
+        before = api.tree_listing(parent, path) or []
+        after = api.tree_listing(merge_sha, path) or []
+        changed = packrules.differing_entries(before, after)
+        if changed != {expected}:
+            where = path or "the repository root"
+            return f"in {where}, the merge changed {sorted(changed)[:10]} instead of only {expected!r}"
+    entry = api.tree_entry(merge_sha, f"packs/{code}/pack.json") or {}
+    if entry.get("sha") != blob_sha or entry.get("mode") != packrules.MODE_REGULAR:
+        return "the merged pack is not the validated file"
+    return None
+
+
+def halt(api: Any, number: str, merge_sha: Any, problem: str, owner_login: Any) -> None:
+    """Open the issue that stops all automatic merging until the owner closes
+    it, mentioning the owner. Best effort: the job fails loudly either way."""
+    import gh_api
+
+    who = f"@{owner_login} " if packrules.is_login(owner_login) else ""
+    body = (f"{who}the post-merge check of PR #{int(number)} failed: {problem}.\n\n"
+            f"Commit: `{merge_sha!s:.40}`. Automatic merging is halted until this issue is closed. "
+            "Inspect the commit (revert it if needed), then close this issue.")
+    try:
+        api.request("POST", api.r("/issues"), body={"title": f"{HALT_TITLE} post-merge check failed (#{int(number)})",
+                                                     "body": body})
+    except (gh_api.ApiError, OSError) as exc:
+        summary(f"Could not open the halt issue: <pre>{esc(exc)}</pre>")
+
+
+def merge_pr(api: Any, number: str, head_sha: str, title: str, message: str) -> tuple[str | None, str | None]:
+    """``(merge commit sha, error)``. Retries GitHub's "base branch was
+    modified" refusals while the head is unchanged; after a network error,
+    asks GitHub whether the merge happened anyway."""
+    import gh_api
+    import time
+
+    body = {"sha": head_sha, "merge_method": "squash", "commit_title": title, "commit_message": message}
+    for attempt in range(4):
+        try:
+            result = api.request("PUT", api.r(f"/pulls/{number}/merge"), body=body)
+            return result.get("sha"), None
+        except gh_api.ApiError as exc:
+            if exc.status not in (405, 409) or attempt == 3:
+                return None, str(exc)
+            time.sleep(3 * (attempt + 1))
+            pr = api.get(api.r(f"/pulls/{number}"))
+            if pr.get("state") != "open" or pr["head"]["sha"] != head_sha:
+                return None, "the PR changed while merging"
+        except OSError as exc:
+            pr = api.get(api.r(f"/pulls/{number}"))
+            if pr.get("merged") and packrules.is_sha(pr.get("merge_commit_sha")):
+                return pr["merge_commit_sha"], None
+            return None, f"network error while merging: {exc}"
+    return None, "merge not completed"
+
+
+def cmd_merge() -> int:
+    import gh_api
+
+    number, head_sha = pr_inputs()
+    code, blob_sha = env("CODE"), env("BLOB_SHA")
+    if packrules.code_problem(code) is not None or not packrules.is_sha(blob_sha):
+        raise SystemExit("CODE / BLOB_SHA missing or malformed")
+    api = client()
+    plan = evaluate(api, number, head_sha, code, blob_sha, comment=False)
+    if not isinstance(plan, Plan):
+        return plan
+    decision = plan.decision
     if decision.new_language:
-        error = reserve_maintainer(api, code, author, author_id, number, default)
+        error = reserve_maintainer(api, code, plan.author, plan.author_id, number, plan.default)
         if error:
             return fail(error, title="Not merged: maintainer not recorded")
-        default_sha = api.branch_sha(default)  # the reservation commit is the new parent
-        summary(f"<code>{esc(author)}</code> is recorded as the maintainer of <code>{esc(code)}</code>.")
-
+        summary(f"<code>{esc(plan.author)}</code> is recorded as the maintainer of <code>{esc(code)}</code>.")
     verb = "Add" if decision.new_language else "Update"
-    try:
-        result = api.request(
-            "PUT",
-            api.r(f"/pulls/{number}/merge"),
-            body={
-                "sha": head_sha,
-                "merge_method": "squash",
-                "commit_title": f"{verb} {code} language pack (#{number})",
-                "commit_message": f"Merged automatically: {decision.reason}.",
-            },
-        )
-    except gh_api.ApiError as exc:
-        return fail(str(exc), title="Merge refused by GitHub")
-    problem = verify_merge(api, result.get("sha"), default_sha, code, blob_sha)
+    merge_sha, error = merge_pr(api, number, head_sha, f"{verb} {code} language pack (#{number})",
+                                f"Merged automatically: {decision.reason}.")
+    if error:
+        return fail(error, title="Merge refused by GitHub")
+    problem = verify_merge(api, merge_sha, code, blob_sha)
     if problem:
-        return fail(f"{problem}. The owner must inspect commit {result.get('sha')!s:.40} on {default}; "
-                    "the index was not refreshed.", title="Post-merge check failed")
+        halt(api, number, merge_sha, problem, plan.owner_login)
+        return fail(f"{problem}. Automatic merging is halted until the owner closes the halt issue; "
+                    f"inspect commit {merge_sha!s:.40} on {plan.default}.", title="Post-merge check failed")
     summary(f"### ✅ Merged — {esc(decision.reason)}\n")
     try:
-        api.request("POST", api.r("/actions/workflows/registry.yml/dispatches"), body={"ref": default})
+        api.request("POST", api.r("/actions/workflows/registry.yml/dispatches"), body={"ref": plan.default})
     except gh_api.ApiError as exc:
         return fail(f"could not start the index update ({exc}); the daily registry run will catch up",
                     title="Index not refreshed yet")
@@ -538,6 +701,7 @@ def main(argv: list[str] | None = None) -> int:
     p_validate = sub.add_parser("validate")
     p_validate.add_argument("--pack", type=Path, required=True)
     p_validate.add_argument("--work", type=Path, required=True)
+    sub.add_parser("decide")
     sub.add_parser("merge")
     args = parser.parse_args(argv)
     if args.command == "resolve":
@@ -546,6 +710,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_inspect(args.out)
     if args.command == "validate":
         return cmd_validate(args.pack, args.work)
+    if args.command == "decide":
+        return cmd_decide()
     return cmd_merge()
 
 

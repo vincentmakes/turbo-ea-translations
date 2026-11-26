@@ -116,7 +116,8 @@ def prepare(app_version: str, work: Path, pinned_sha: str = "") -> dict[str, obj
         label, sha = resolve(app_version, pinned_sha)
         validator, english = fetch(sha, work / sha)
         return {"validator_label": label, "validator_sha": sha, "validator": validator,
-                "english_label": label, "english_sha": sha, "english": english}
+                "english_label": label, "english_sha": sha, "english": english,
+                "english_validator": validator}
     english_label, english_sha = resolve(app_version)
     release = latest_release(_git("ls-remote", "--tags", REPO_URL, "refs/tags/v*"))
     if english_label == "main" and release is not None:
@@ -141,11 +142,18 @@ def prepare(app_version: str, work: Path, pinned_sha: str = "") -> dict[str, obj
         candidates.append(("main", main))
     for label, sha in candidates:
         if (checkout(sha) / VALIDATOR_PATH).is_file():
-            english = checkout(english_sha) / ENGLISH_PATH
+            english_root = checkout(english_sha)
+            english = english_root / ENGLISH_PATH
             if not english.is_dir() or not any(english.glob("*.json")):
                 raise RuntimeError(f"turbo-ea {english_label} has no English locale files")
+            if not (english_root / VALIDATOR_PATH).is_file():
+                # The minimum app_version: a version without language packs
+                # cannot have exported one.
+                raise RuntimeError(f"turbo-ea {english_label} predates language packs; "
+                                   "export the pack again from a current version")
             return {"validator_label": label, "validator_sha": sha, "validator": checkout(sha) / VALIDATOR_PATH,
-                    "english_label": english_label, "english_sha": english_sha, "english": english}
+                    "english_label": english_label, "english_sha": english_sha, "english": english,
+                    "english_validator": english_root / VALIDATOR_PATH}
     raise RuntimeError(
         f"no turbo-ea release or main has {VALIDATOR_PATH} yet (language packs are not released yet)"
     )
@@ -186,6 +194,34 @@ def run_validator(validator: Path, pack: Path, english: Path) -> tuple[int, str]
             timeout=600,
         )
     return result.returncode, (result.stdout + result.stderr)
+
+
+def expected_instructions(validator: Path, english_name: str) -> str:
+    """The ``instructions`` text turbo-ea's export writes for ``english_name``
+    (``pack_instructions`` of the given ``language_pack.py``), computed in an
+    isolated process. ``english_name`` must already be validated."""
+    if not packrules.is_valid_english_name(english_name):
+        raise ValueError("invalid English name")
+    code = (
+        "import importlib.util, json, sys\n"
+        "spec = importlib.util.spec_from_file_location('language_pack', sys.argv[1])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "sys.modules['language_pack'] = module\n"  # dataclasses look their module up
+        "spec.loader.exec_module(module)\n"
+        "print(json.dumps(module.pack_instructions(sys.argv[2])))\n"
+    )
+    with tempfile.TemporaryDirectory() as empty:
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", code, str(validator), english_name],
+            cwd=empty, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "PYTHONIOENCODING": "utf-8"},
+            capture_output=True, text=True, timeout=60,
+        )
+    if result.returncode != 0:
+        raise RuntimeError("could not compute the export's instructions text")
+    text = json.loads(result.stdout)
+    if not isinstance(text, str):
+        raise RuntimeError("unexpected instructions text")
+    return text
 
 
 def read_english(english: Path) -> dict[str, dict[str, str]]:

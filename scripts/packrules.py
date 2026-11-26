@@ -69,6 +69,9 @@ MAX_MERGES_PER_LANGUAGE_PER_DAY = 5
 #: Turbo EA version it was exported from (percent), on top of the repository
 #: owner's approval.
 MIN_NEW_LANGUAGE_COVERAGE = 50.0
+#: Open pull requests one author may have before the bot stops judging more
+#: of them (and so stops asking maintainers or the owner to review them).
+MAX_OPEN_PRS_PER_AUTHOR = 3
 #: Deepest JSON nesting a pack needs is 3 (pack > strings > namespace); the
 #: limit leaves room and keeps the parser far from recursion limits.
 MAX_JSON_DEPTH = 8
@@ -146,13 +149,24 @@ def has_forbidden_chars(text: str) -> bool:
     return False
 
 
+#: Anything that could make a language's name read as a link or an address:
+#: a scheme (``javascript:``), a bare domain (``evil.example``), path or
+#: address characters.
+_NAME_FORBIDDEN = re.compile(r"[<>/\\@:]|[A-Za-z0-9-]\.[A-Za-z]{2,}")
+
+
 def is_valid_native_name(name: Any) -> bool:
+    """A language's own name as pickers show it: one line of at most 60
+    characters, no markup, link, address, control character, bidi override,
+    bidi isolate or zero-width character."""
     return (
         isinstance(name, str)
         and 0 < len(name) <= MAX_NATIVE_NAME_LENGTH
         and not all(ch.isspace() or ch in _INVISIBLE for ch in name)
         and "\n" not in name
         and "\t" not in name
+        and not any(ch in _INVISIBLE for ch in name)
+        and not _NAME_FORBIDDEN.search(name)
         and is_plain_text(name)
     )
 
@@ -365,11 +379,10 @@ def header_problems(pack: Mapping[str, Any], folder_code: str | None) -> list[st
             "Admin > Settings > Custom Languages"
         )
     instructions = pack.get("instructions")
-    if instructions is not None and not (
-        isinstance(instructions, str) and len(instructions) <= 2000 and is_plain_text(instructions)
-    ):
-        problems.append('"instructions" must be the plain text of the export: at most 2000 characters, '
-                        "no markup, no links, no control characters")
+    # The content is checked against the exact text turbo-ea's export writes
+    # (judge.py validate); here only its type and size.
+    if instructions is not None and not (isinstance(instructions, str) and len(instructions) <= 2000):
+        problems.append('"instructions" must be the text of the export (at most 2000 characters)')
     locale = pack.get("locale")
     if not isinstance(locale, dict):
         problems.append('"locale" must be an object')
@@ -511,6 +524,7 @@ def decide(
     head_sha: str,
     owner_id: Any = None,
     owner_login: Any = None,
+    locale_changed: bool = False,
 ) -> Decision:
     """The merge policy for a contribution that passed validation.
 
@@ -556,6 +570,17 @@ def decide(
             return Decision("wait", "the repository owner requested changes", True)
         return Decision("wait", "a new language waits for the repository owner's approving review of the "
                         "latest commit", True, (owner,))
+    if locale_changed and author_id != owner_id:
+        # The language's code-level identity (its name, English name or
+        # direction) is changing: that is the owner's call, not a maintainer's.
+        if owner is None:
+            return Decision("wait", "the language's name or direction changes; left for the owner")
+        if verdict_of(owner_id) == "APPROVED":
+            return Decision("merge", "change of the language's name or direction approved by the owner")
+        if verdict_of(owner_id) == "CHANGES_REQUESTED":
+            return Decision("wait", "the repository owner requested changes")
+        return Decision("wait", "this changes the language's name, English name or direction, which "
+                        "needs the repository owner's approval", ask=(owner,))
     deciders = {m.user_id: m.login for m in maintainers}
     if owner is not None:
         deciders.setdefault(owner_id, owner)
@@ -580,21 +605,29 @@ def decide(
                     + ", ".join(sorted(listed)), ask=tuple(sorted(listed)))
 
 
-def waiting_comment(number: str, head_sha: str, decision: Decision, marker: str) -> str:
-    """The bot's comment for a PR waiting for reviews: fixed text, validated
-    logins and the head SHA only (no PR-controlled text)."""
+REVIEW_REQUEST_MARKER = "<!-- turbo-ea-translations:review-request -->"
+
+
+def waiting_comment(head_sha: str, decision: Decision, details: str = "") -> str:
+    """The bot's one comment on a PR waiting for reviews (edited for later
+    commits): fixed text, validated logins, the head SHA and ``details``
+    built by the caller from numbers only. No PR-controlled text."""
     if not decision.ask or not all(is_login(login) for login in decision.ask) or not is_sha(head_sha):
         raise ValueError("nothing to ask, or an invalid login")
     who = " ".join(f"@{login}" for login in decision.ask)
-    what = ("This new language needs an approving review from the repository owner."
-            if decision.new_language else
-            "This change to the language needs an approving review from one of its maintainers.")
+    if decision.new_language:
+        what = "This new language needs an approving review from the repository owner."
+    elif "owner" in decision.reason:
+        what = "This change needs an approving review from the repository owner."
+    else:
+        what = "This change to the language needs an approving review from one of its maintainers."
     return (
-        f"{marker}\n"
-        f"{who}: the checks passed for `{head_sha[:12]}`. {what} "
+        f"{REVIEW_REQUEST_MARKER}\n"
+        f"{who}: the checks passed for `{head_sha}`. {what} "
         "Approve the pull request (Files changed \u2192 Review changes \u2192 Approve) and it merges "
-        "automatically; request changes to stop it. New commits need a new approval.\n\n"
-        "_Posted by the repository's automation._"
+        "automatically; request changes to stop it. New commits need a new approval."
+        + (f"\n\n{details}" if details else "")
+        + "\n\n_Posted by the repository's automation; updated for each new commit._"
     )
 
 
@@ -655,6 +688,9 @@ def pack_stats(pack: Mapping[str, Any], english: Mapping[str, Mapping[str, str]]
             "current": current,
             "identical_to_english": identical,
             "coverage": round(100.0 * translated / total, 1) if total else 0.0,
+            # What the new-language minimum is measured on: a value copied
+            # from the English text does not count as translated.
+            "coverage_differing": round(100.0 * (translated - identical) / total, 1) if total else 0.0,
         }
     )
     return stats

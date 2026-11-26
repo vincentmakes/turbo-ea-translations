@@ -14,8 +14,9 @@ Turbo EA installation can use them.
 > **Packs are provided by the community and are not reviewed by the Turbo EA
 > project.** Each pack is checked automatically (see below): the translated
 > strings cannot add markup, links or broken placeholders that the English text
-> does not have, and the few free-text header fields (the language's native name
-> and the export's instructions) cannot contain markup or links. Nobody checks
+> does not have, the language's native name cannot contain markup, links or
+> addresses, and the instructions must be exactly the text Turbo EA exports.
+> Nobody checks
 > the quality or the accuracy of the translations, and a pack may be very
 > incomplete. Look at a pack in Turbo EA's **Review strings** screen before you
 > offer it to your users.
@@ -96,10 +97,18 @@ The automation relies on these settings; each line says why.
   approval then takes effect at the daily sweep).
 * **Scheduled workflows** (Sweep, Registry) are switched off by GitHub after 60
   days without repository activity; switch them back on in the Actions tab.
-* **Until Turbo EA ships `language_pack.py`** in a release (or on `main`), every
-  pack check fails with a clear message. To test earlier, set the repository
-  variable `TURBO_EA_VALIDATOR_SHA` to a turbo-ea commit that has it, and remove
-  it after the release.
+* **Emergency stop:** set the repository variable `AUTOMERGE_HALTED` (any
+  value) to stop every automatic merge; delete it to resume. A failed post-merge
+  check stops merging on its own: it opens an issue titled
+  `[automerge halted] …` that mentions you, and merging resumes when you close
+  it (after inspecting, and if needed reverting, the commit it names).
+* **Removing a maintainer** (inactive or abusive): edit `packs/<code>/MAINTAINERS`
+  yourself and delete their line. You are an implicit maintainer of every
+  language, so a language left without one waits for your approval.
+* The validator comes from Turbo EA releases (it is in v2.214.0 and later).
+  `TURBO_EA_VALIDATOR_SHA` (a repository variable, optional) pins a specific
+  commit **of github.com/vincentmakes/turbo-ea** instead — only for testing an
+  unreleased validator; remove it afterwards.
 * Delete merged branches (or turn on "Automatically delete head branches").
 
 ## Licence

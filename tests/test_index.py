@@ -156,10 +156,10 @@ class Prepare(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work, mock.patch.object(turbo_ea, "_git", git), \
                 mock.patch.object(turbo_ea, "fetch", fetch):
             got = turbo_ea.prepare(version, Path(work), pinned)
-            return {k: v for k, v in got.items() if k.endswith(("label", "sha"))}
+            return {k: v for k, v in got.items() if k.endswith(("_label", "_sha"))}
 
     def test_validator_from_latest_release_english_from_pack_version(self):
-        got = self.run_prepare("2.213.0", has_validator={"2" * 40})
+        got = self.run_prepare("2.213.0", has_validator={"1" * 40, "2" * 40})
         self.assertEqual(got, {"validator_label": "v2.300.0", "validator_sha": "2" * 40,
                                "english_label": "v2.213.0", "english_sha": "1" * 40})
 
@@ -167,6 +167,11 @@ class Prepare(unittest.TestCase):
         # 2.213.0 has a (hypothetical, more lenient) validator; the newest release wins.
         got = self.run_prepare("2.213.0", has_validator={"1" * 40, "2" * 40})
         self.assertEqual(got["validator_sha"], "2" * 40)
+
+    def test_version_before_language_packs_refused(self):
+        # v2.213.0 has no language_pack.py: no pack can have been exported from it.
+        with self.assertRaisesRegex(RuntimeError, "predates language packs"):
+            self.run_prepare("2.213.0", has_validator={"2" * 40})
 
     def test_falls_back_to_main_then_fails_closed(self):
         got = self.run_prepare("2.301.0", has_validator={"9" * 40})
@@ -242,3 +247,14 @@ class Api(unittest.TestCase):
             with self.assertRaises(gh_api.ApiError):
                 client.request("GET", "/x")
         self.assertEqual(calls, ["PUT", "GET", "GET", "GET"])
+
+
+class Instructions(unittest.TestCase):
+    def test_template_from_the_validator_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            v = Path(d) / "language_pack.py"
+            v.write_text("from dataclasses import dataclass\n@dataclass\nclass X:\n    a: int = 1\n"
+                         "def pack_instructions(language):\n    return f'Translate into {language}.'\n")
+            self.assertEqual(turbo_ea.expected_instructions(v, "Dutch"), "Translate into Dutch.")
+            with self.assertRaises(ValueError):
+                turbo_ea.expected_instructions(v, "Dutch'); import os #")

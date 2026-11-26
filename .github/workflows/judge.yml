@@ -54,6 +54,7 @@ jobs:
       blob_sha: ${{ steps.inspect.outputs.blob_sha }}
       head_sha: ${{ steps.inspect.outputs.head_sha }}
       coverage: ${{ steps.validate.outputs.coverage }}
+      identical: ${{ steps.validate.outputs.identical }}
     steps:
       - name: Get the judging scripts from the base branch
         env:
@@ -85,12 +86,54 @@ jobs:
           python3 "$RUNNER_TEMP/judge/scripts/judge.py" validate
           --pack "$RUNNER_TEMP/pack/pack.json" --work "$RUNNER_TEMP/work"
 
-  merge:
-    name: merge
+  decide:
+    name: decide
     needs: validate
     if: >-
       needs.validate.result == 'success' &&
       needs.validate.outputs.kind == 'contribution' &&
+      needs.validate.outputs.head_sha == inputs.head_sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write  # the one comment asking maintainers / the owner for a review
+      issues: write         # (PR comments go through the issues API)
+    outputs:
+      action: ${{ steps.decide.outputs.action }}
+    steps:
+      - name: Get the judging scripts from the base branch
+        env:
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          git init -q "$RUNNER_TEMP/judge"
+          git -C "$RUNNER_TEMP/judge" fetch -q --depth 1 "https://github.com/$REPO.git" "$BASE_SHA"
+          git -C "$RUNNER_TEMP/judge" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+
+      - name: Apply the maintainer policy (no merge here)
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
+          CODE: ${{ needs.validate.outputs.code }}
+          BLOB_SHA: ${{ needs.validate.outputs.blob_sha }}
+          COVERAGE: ${{ needs.validate.outputs.coverage }}
+          IDENTICAL: ${{ needs.validate.outputs.identical }}
+          # Set by the owner (Settings > Variables) to stop all automatic merges.
+          AUTOMERGE_HALTED: ${{ vars.AUTOMERGE_HALTED }}
+        run: python3 "$RUNNER_TEMP/judge/scripts/judge.py" decide
+
+  merge:
+    name: merge
+    needs: [validate, decide]
+    # Only a "merge" decision enters the repository-wide lock, so PRs that are
+    # merely waiting never queue in it.
+    if: >-
+      needs.validate.result == 'success' &&
+      needs.decide.result == 'success' &&
+      needs.decide.outputs.action == 'merge' &&
       needs.validate.outputs.head_sha == inputs.head_sha
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -104,8 +147,9 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write       # merge, write MAINTAINERS for a new language
-      pull-requests: write  # merge, comment asking maintainers / the owner for a review
+      pull-requests: write  # merge
       actions: write        # start registry.yml (index.json)
+      issues: write         # open the halt issue if a post-merge check fails
     steps:
       - name: Get the judging scripts from the base branch
         env:
@@ -116,7 +160,7 @@ jobs:
           git -C "$RUNNER_TEMP/judge" fetch -q --depth 1 "https://github.com/$REPO.git" "$BASE_SHA"
           git -C "$RUNNER_TEMP/judge" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
 
-      - name: Apply the maintainer policy and merge the validated SHA
+      - name: Re-check everything and merge the validated SHA
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
@@ -124,4 +168,7 @@ jobs:
           CODE: ${{ needs.validate.outputs.code }}
           BLOB_SHA: ${{ needs.validate.outputs.blob_sha }}
           COVERAGE: ${{ needs.validate.outputs.coverage }}
+          IDENTICAL: ${{ needs.validate.outputs.identical }}
+          # Set by the owner (Settings > Variables) to stop all automatic merges.
+          AUTOMERGE_HALTED: ${{ vars.AUTOMERGE_HALTED }}
         run: python3 "$RUNNER_TEMP/judge/scripts/judge.py" merge

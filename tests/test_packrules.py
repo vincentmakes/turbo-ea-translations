@@ -153,12 +153,20 @@ class ReadingPacks(unittest.TestCase):
         self.assertTrue(problems(format_version=2))
         self.assertTrue(problems(format_version=True))
         self.assertTrue(problems(format_version=1.0))
-        self.assertTrue(problems(instructions="See https://evil.example"))
-        self.assertTrue(problems(instructions="<img src=x>"))
         self.assertTrue(problems(instructions="x" * 2001))
+        self.assertTrue(problems(instructions=["x"]))
+        # The real export text mentions <tags> and $t(...): the header check
+        # must accept it (its exact content is checked against turbo-ea's).
+        self.assertFalse(problems(instructions="Keep the {{placeholders}}, any <tags> and $t(...) references"))
         self.assertTrue(problems(locale={"code": "nl", "name": "www.evil.example", "english_name": "Dutch",
                                          "rtl": False}))
         self.assertTrue(problems(locale={"code": "nl", "name": "<b>NL", "english_name": "Dutch", "rtl": False}))
+        for bad in ("evil.example", "javascript:x", "a@b", "a/b", "Ned\u2066erlands", "x\u200by"):
+            self.assertTrue(problems(locale={"code": "nl", "name": bad, "english_name": "Dutch", "rtl": False}), bad)
+        for good in ("Nederlands", "\u4e2d\u6587 (\u7e41\u9ad4)", "\u05e2\u05d1\u05e8\u05d9\u05ea",
+                     "Bahasa Indonesia", "Norsk bokm\u00e5l"):
+            self.assertFalse(packrules.header_problems(
+                good_pack(locale={"code": "nl", "name": good, "english_name": "Dutch", "rtl": False}), "nl"), good)
         self.assertTrue(problems(strings={"metamodel": {f"type.T{i}.label": "x"
                                                         for i in range(packrules.MAX_METAMODEL_KEYS + 1)}}))
         self.assertTrue(problems(strings={f"ns{i}": {} for i in range(packrules.MAX_NAMESPACES + 1)}))
@@ -279,13 +287,23 @@ class Decide(unittest.TestCase):
 
     def test_waiting_comment(self):
         decision = self.d()
-        body = packrules.waiting_comment("7", HEAD, decision, "<!-- m -->")
-        self.assertTrue(body.startswith("<!-- m -->\n@alice @bob: "))
-        self.assertIn(HEAD[:12], body)
+        body = packrules.waiting_comment(HEAD, decision, "Coverage: 80%")
+        self.assertTrue(body.startswith(packrules.REVIEW_REQUEST_MARKER + "\n@alice @bob: "))
+        self.assertIn(HEAD, body)
+        self.assertIn("Coverage: 80%", body)
         with self.assertRaises(ValueError):
-            packrules.waiting_comment("7", HEAD, packrules.Decision("wait", "x", ask=("a b",)), "m")
+            packrules.waiting_comment(HEAD, packrules.Decision("wait", "x", ask=("a b",)))
         with self.assertRaises(ValueError):
-            packrules.waiting_comment("7", HEAD, packrules.Decision("wait", "x"), "m")
+            packrules.waiting_comment(HEAD, packrules.Decision("wait", "x"))
+
+    def test_locale_change_needs_owner(self):
+        decision = self.d(author="alice", author_id=1, locale_changed=True)
+        self.assertEqual((decision.action, decision.ask), ("wait", ("owner",)))
+        self.assertEqual(self.d(author="alice", author_id=1, locale_changed=True,
+                                reviews=[review("owner", "APPROVED")]).action, "merge")
+        self.assertEqual(self.d(author="alice", author_id=1, locale_changed=True,
+                                reviews=[review("bob", "APPROVED")]).action, "wait")
+        self.assertEqual(self.d(author="owner", author_id=99, locale_changed=True).action, "merge")
 
     def test_no_maintainers_waits_for_owner(self):
         decision = self.d(maintainers=[], reviews=[review("alice", "APPROVED")])

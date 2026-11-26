@@ -35,7 +35,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("pack", type=Path)
     parser.add_argument("--code", help="the folder code (default: taken from packs/<code>/pack.json)")
     parser.add_argument("--turbo-ea", type=Path, help="use a local turbo-ea checkout instead of downloading")
-    parser.add_argument("--sha", default="", help="validate against this turbo-ea commit instead")
+    parser.add_argument("--sha", default="",
+                        help="validate against this commit of github.com/vincentmakes/turbo-ea instead")
+    parser.add_argument("--new", action="store_true",
+                        help="this is a new language: also apply the minimum coverage")
     args = parser.parse_args(argv)
 
     folder_code = args.code
@@ -80,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
                 print("fetching turbo-ea's validator and English files …")
                 got = turbo_ea.prepare(pack["app_version"], Path(work), args.sha)
                 validator, english = got["validator"], got["english"]
+                if "instructions" in pack and pack["instructions"] != turbo_ea.expected_instructions(
+                        Path(str(got["english_validator"])), pack["locale"]["english_name"]):
+                    print('invalid: "instructions" must be exactly the text Turbo EA writes into the export')
+                    return 1
                 label = f"{got['english_label']}"
                 print(f"validator: turbo-ea {got['validator_label']}; English text: {got['english_label']}")
         except (RuntimeError, ValueError, OSError) as exc:
@@ -88,8 +95,15 @@ def main(argv: list[str] | None = None) -> int:
         code, output = turbo_ea.run_validator(validator, args.pack.resolve(), english)
         print(output.rstrip())
         stats = packrules.pack_stats(pack, turbo_ea.read_english(english))
+    differing = stats.get("coverage_differing", 0.0)
     print(f"compared with turbo-ea {label}: {stats.get('translated', 0)}/{stats.get('english_strings', 0)} "
-          f"interface strings ({stats.get('coverage', 0)}%), {stats['metamodel_strings']} metamodel labels")
+          f"interface strings carry a value, {stats.get('identical_to_english', 0)} identical to English "
+          f"-> {differing}% translated; {stats['metamodel_strings']} metamodel labels")
+    if not differing >= packrules.MIN_NEW_LANGUAGE_COVERAGE:
+        print(f"note: a NEW language needs at least {packrules.MIN_NEW_LANGUAGE_COVERAGE:.0f}% "
+              "(values identical to English do not count)")
+        if args.new and code == 0:
+            return 1
     if code == 0:
         print("✔ valid — this pack passes the same checks as the pull-request check")
     return {0: 0, 1: 1}.get(code, 2)

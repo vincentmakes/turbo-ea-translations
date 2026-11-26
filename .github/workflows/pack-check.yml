@@ -35,6 +35,7 @@ jobs:
       contents: write
       pull-requests: write
       actions: write
+      issues: write
     with:
       pr_number: ${{ format('{0}', github.event.pull_request.number) }}
       head_sha: ${{ github.event.pull_request.head.sha }}

@@ -147,7 +147,7 @@ class Workflows(unittest.TestCase):
 
     def test_write_permissions_per_job(self):
         """Exactly these jobs may hold a write permission."""
-        allowed = {("judge.yml", "merge"), ("registry.yml", "index"),
+        allowed = {("judge.yml", "merge"), ("judge.yml", "decide"), ("registry.yml", "index"),
                    ("pack-check.yml", "judge"), ("sweep.yml", "judge")}  # callers: cap for judge.yml
         for path in WORKFLOWS:
             for name, job in jobs(path.read_text()).items():
@@ -168,9 +168,64 @@ class Workflows(unittest.TestCase):
                 for step in steps(job):
                     if "github.token" in step:
                         self.assertNotIn("git -C", step, f"{path.name}/{name}: a git step holds the token")
-                        self.assertRegex(step, r"judge\.py\" (inspect|resolve|merge)|build_index\.py\" publish",
+                        self.assertRegex(step, r"judge\.py\" (inspect|resolve|decide|merge)|build_index\.py\" publish",
                                          f"{path.name}/{name}: unexpected step with the token")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Structure(unittest.TestCase):
+    """The properties the security argument relies on, pinned one by one."""
+
+    def text(self, name):
+        return (WORKFLOWS[0].parent / name).read_text()
+
+    def test_top_level_permissions_block_is_read_only(self):
+        for path in WORKFLOWS:
+            text = path.read_text()
+            m = re.search(r"^permissions:(.*?)(?=^\S)", text, re.M | re.S)
+            self.assertIsNotNone(m, path.name)
+            block = m.group(1).strip()
+            if block == "{}":
+                continue
+            for line in block.splitlines():
+                self.assertRegex(line.strip(), r"^[a-z-]+: read$", f"{path.name}: {line}")
+
+    def test_merge_runs_only_after_validate_and_decide(self):
+        merge = jobs(self.text("judge.yml"))["merge"]
+        self.assertIn("needs: [validate, decide]", merge)
+        self.assertIn("needs.decide.outputs.action == 'merge'", merge)
+        self.assertIn("needs.validate.outputs.head_sha == inputs.head_sha", merge)
+        self.assertIn("group: merge-default-branch", merge)
+        decide = jobs(self.text("judge.yml"))["decide"]
+        self.assertIn("needs: validate", decide)
+        self.assertIn("needs.validate.result == 'success'", decide)
+
+    def test_pack_check_only_for_main(self):
+        text = self.text("pack-check.yml")
+        self.assertRegex(text, r"pull_request_target:\n(?:\s+#.*\n|\s+types:.*\n)*\s+branches: \[main\]")
+
+    def test_no_checkout_action_at_all(self):
+        for path in WORKFLOWS:
+            self.assertNotIn("actions/checkout", path.read_text(), path.name)
+
+    def test_privileged_env_values_come_from_trusted_sources(self):
+        allowed = {
+            "github.token", "github.repository", "github.sha", "github.event_name",
+            "github.event.workflow_run.head_sha", "inputs.pr_number", "inputs.head_sha",
+            "steps.inspect.outputs.app_version", "steps.inspect.outputs.new_language",
+            "vars.TURBO_EA_VALIDATOR_SHA", "vars.AUTOMERGE_HALTED",
+            "needs.validate.outputs.head_sha", "needs.validate.outputs.code",
+            "needs.validate.outputs.blob_sha", "needs.validate.outputs.coverage",
+            "needs.validate.outputs.identical",
+        }
+        for name in ("judge.yml", "sweep.yml", "registry.yml"):
+            for job_name, job in jobs(self.text(name)).items():
+                for step in steps(job):
+                    env_block = re.search(r"env:\n((?:\s+[A-Z_]+: .*\n|\s+#.*\n)+)", step + "\n")
+                    if not env_block:
+                        continue
+                    for expr in re.findall(r"\$\{\{\s*([^}]*?)\s*\}\}", env_block.group(1)):
+                        self.assertIn(expr, allowed, f"{name}/{job_name}: env value {expr}")

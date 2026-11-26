@@ -81,6 +81,7 @@ jobs:
       contents: write
       pull-requests: write
       actions: write
+      issues: write
     with:
       pr_number: ${{ matrix.pr.number }}
       head_sha: ${{ matrix.pr.head_sha }}

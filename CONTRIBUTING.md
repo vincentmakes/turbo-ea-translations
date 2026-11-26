@@ -74,13 +74,15 @@ pull request; it reads your file as data. It checks:
 * the file is UTF-8 JSON without a byte-order mark, an object, not nested more
   than 8 levels, with no duplicate keys;
 * the header: `"format": "turbo-ea-language-pack"`, `"format_version": 1`,
-  `"mode": "share"`, `app_version` a plain version (`2.214.0`) that is a Turbo
-  EA release or newer than the latest one, the language code (valid, not
-  built-in, equal to the folder), the native name (one line, at most 60
-  characters, no markup or links), the English name (letters, spaces, brackets,
-  dashes), `rtl` true or false, `instructions` plain text (no markup or links),
+  `"mode": "share"`, `app_version` a plain version (`2.214.0`) of a Turbo EA
+  release that has language packs (or newer than the latest release), the
+  language code (valid, not built-in, equal to the folder), the native name
+  (one line, at most 60 characters, no markup, links, addresses or invisible
+  characters), the English name (letters, spaces, brackets, dashes), `rtl` true
+  or false, `instructions` exactly as Turbo EA exports them (do not edit them),
   `source_hashes` made of 12-character hashes, and at most 5000 `metamodel`
   labels;
+* that you have at most 3 open pull requests here;
 * then **Turbo EA's own validator** (`language_pack.py`, the same code the app
   runs on import, taken from the latest Turbo EA release) against the English
   text of the Turbo EA version your pack was exported from (the release tag of
@@ -118,7 +120,7 @@ With Python 3.10+ and `git`:
 git clone https://github.com/vincentmakes/turbo-ea-translations
 cd turbo-ea-translations
 mkdir -p packs/nl && cp ~/Downloads/your-export.json packs/nl/pack.json
-python3 scripts/check_pack.py packs/nl/pack.json
+python3 scripts/check_pack.py packs/nl/pack.json        # add --new for a new language
 ```
 
 It applies the same rules and runs the same validator, downloaded from
@@ -129,10 +131,10 @@ turbo-ea checkout instead.
 
 Nobody from the Turbo EA project reviews packs. Instead:
 
-* **New language:** the pack must cover at least **50%** of the interface
-  strings of the Turbo EA version it was exported from (the check shows the
-  number), and the **repository owner** has to approve the pull request — the
-  bot mentions them in a comment. Once approved, **you become the language's
+* **New language:** at least **50%** of the interface strings of the Turbo EA
+  version it was exported from must be translated — values identical to the
+  English text do not count (the check shows the number) — and the **repository
+  owner** has to approve the pull request; the bot mentions them in a comment. Once approved, **you become the language's
   maintainer** — your GitHub login and numeric user id are written to
   `packs/<code>/MAINTAINERS` — and the pull request merges automatically. The
   id is what counts: if you rename your account you stay the maintainer, and
@@ -150,8 +152,11 @@ Nobody from the Turbo EA project reviews packs. Instead:
   reaches every open pull request within a few days however many there are).
   A maintainer's "Request changes" blocks it until they approve. If you push new
   commits, an earlier approval no longer counts — the new version needs one.
-  The bot posts a comment mentioning the maintainers (once per commit), and the
-  check's summary names them too.
+  The bot keeps one comment on the pull request mentioning the maintainers
+  (updated for new commits), and the check's summary names them too.
+* **Changing the language's name, English name or direction** (`locale.name`,
+  `locale.english_name`, `locale.rtl`) needs the repository owner's approval,
+  even from a maintainer.
 * The repository owner counts as a maintainer of every language: their approval
   also merges a pull request.
 * **Limits:** at most 10 automatic merges per author and 5 per language in 24
