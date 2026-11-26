@@ -129,7 +129,10 @@ turbo-ea checkout instead.
 
 Nobody from the Turbo EA project reviews packs. Instead:
 
-* **New language:** once the check passes, **you become the language's
+* **New language:** the pack must cover at least **50%** of the interface
+  strings of the Turbo EA version it was exported from (the check shows the
+  number), and the **repository owner** has to approve the pull request — the
+  bot mentions them in a comment. Once approved, **you become the language's
   maintainer** — your GitHub login and numeric user id are written to
   `packs/<code>/MAINTAINERS` — and the pull request merges automatically. The
   id is what counts: if you rename your account you stay the maintainer, and
@@ -147,7 +150,8 @@ Nobody from the Turbo EA project reviews packs. Instead:
   reaches every open pull request within a few days however many there are).
   A maintainer's "Request changes" blocks it until they approve. If you push new
   commits, an earlier approval no longer counts — the new version needs one.
-  The check's summary names the maintainers to ask; mention them in a comment.
+  The bot posts a comment mentioning the maintainers (once per commit), and the
+  check's summary names them too.
 * The repository owner counts as a maintainer of every language: their approval
   also merges a pull request.
 * **Limits:** at most 10 automatic merges per author and 5 per language in 24
@@ -170,8 +174,8 @@ changes to it wait for the repository owner.
 
 ## 6. Licence
 
-This repository does not have a licence yet. Check the README for the current
-situation before contributing.
+The repository is published under the [MIT licence](LICENSE). By opening a pull
+request you agree that your pack (or other contribution) is published under it.
 
 ## Changes to the repository itself
 

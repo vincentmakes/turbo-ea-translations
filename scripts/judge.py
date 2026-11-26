@@ -247,6 +247,7 @@ def cmd_inspect(out_dir: Path) -> int:
     set_output("app_version", pack["app_version"])
     set_output("blob_sha", entry["sha"])
     set_output("head_sha", head_sha)
+    set_output("new_language", "false" if exists else "true")
     summary(
         f"### Pack <code>{esc(verdict.code)}</code> — {esc(pack['locale']['english_name'])}\n\n"
         f"* PR #{number} by <code>{esc(author)}</code> at <code>{head_sha[:12]}</code>\n"
@@ -295,7 +296,30 @@ def cmd_validate(pack_file: Path, work: Path) -> int:
             "Each line is `namespace  key  reason`. See CONTRIBUTING.md for what each reason means; "
             "fix the strings in Turbo EA, export **Share (community pack)** again and push the new file.\n"
         )
-    return 0 if code == 0 else 1
+    if code != 0:
+        return 1
+    return check_coverage(pack_file, Path(str(got["english"])), str(got["english_label"]))
+
+
+def check_coverage(pack_file: Path, english_dir: Path, english_label: str) -> int:
+    """Report the pack's coverage of the English text it was made from, and
+    refuse a new language below :data:`packrules.MIN_NEW_LANGUAGE_COVERAGE`."""
+    import turbo_ea
+
+    pack = packrules.parse_pack_bytes(pack_file.read_bytes())
+    stats = packrules.pack_stats(pack, turbo_ea.read_english(english_dir))
+    coverage = float(stats.get("coverage", 0.0))
+    set_output("coverage", f"{coverage:.1f}")
+    summary(
+        f"### Coverage\n\n{stats['translated']} of {stats['english_strings']} interface strings of "
+        f"{esc(english_label)} ({coverage:.1f}%), {stats['metamodel_strings']} metamodel labels; "
+        f"{stats['identical_to_english']} translations are identical to the English text.\n"
+    )
+    if env("NEW_LANGUAGE") == "true" and coverage < packrules.MIN_NEW_LANGUAGE_COVERAGE:
+        return fail(f"a new language needs at least {packrules.MIN_NEW_LANGUAGE_COVERAGE:.0f}% of the interface "
+                    f"strings; this pack has {coverage:.1f}%. Translate more in Turbo EA, export again and "
+                    "push the new file.", title="Not enough of the interface translated")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +348,27 @@ def within_daily_limits(api: Any, author: str, code: str) -> str | None:
     if by_language >= packrules.MAX_MERGES_PER_LANGUAGE_PER_DAY:
         return f"the {code} pack already changed {by_language} times in the last 24 hours"
     return None
+
+
+COMMENT_MARKER = "<!-- turbo-ea-translations:review-request:{sha} -->"
+
+
+def ask_for_review(api: Any, number: str, head_sha: str, decision: Any) -> None:
+    """Comment once per head commit, mentioning who has to approve. Never
+    fatal: the wait is reported in the summary either way."""
+    import gh_api
+
+    marker = COMMENT_MARKER.format(sha=head_sha)
+    try:
+        comments, complete = api.paginate_complete(api.r(f"/issues/{number}/comments"), limit=1000)
+        if not complete or any(marker in str(c.get("body", "")) and
+                               (c.get("user") or {}).get("login") == "github-actions[bot]" for c in comments):
+            return
+        body = packrules.waiting_comment(number, head_sha, decision, marker)
+        api.request("POST", api.r(f"/issues/{number}/comments"), body={"body": body})
+        summary("Asked " + ", ".join(f"<code>{esc(login)}</code>" for login in decision.ask) + " for a review.")
+    except (gh_api.ApiError, OSError, ValueError) as exc:
+        summary(f"Could not post the review request comment: <pre>{esc(exc)}</pre>")
 
 
 def wait(reason: str) -> int:
@@ -398,6 +443,7 @@ def cmd_merge() -> int:
     head_owner = ((pr["head"].get("repo") or {}).get("owner") or {}).get("login")
     owner = repo.get("owner") or {}
     owner_id = owner.get("id") if owner.get("type") == "User" else None
+    owner_login = owner.get("login") if owner_id is not None else None
     default_sha = api.branch_sha(default)
 
     # Re-derive everything about the head against the current default branch.
@@ -420,9 +466,20 @@ def cmd_merge() -> int:
     decision = packrules.decide(
         author=author, author_id=author_id, head_owner=head_owner, language_exists=exists,
         maintainers=maintainers, reviews=reviews, head_sha=head_sha, owner_id=owner_id,
+        owner_login=owner_login,
     )
     if decision.action != "merge":
+        if decision.ask:
+            ask_for_review(api, number, head_sha, decision)
         return wait(decision.reason)
+    if decision.new_language:
+        try:
+            coverage = float(env("COVERAGE"))
+        except ValueError:
+            coverage = -1.0
+        if coverage < packrules.MIN_NEW_LANGUAGE_COVERAGE:
+            return wait(f"a new language needs at least {packrules.MIN_NEW_LANGUAGE_COVERAGE:.0f}% coverage "
+                        "measured by this run's validation")
     limit = within_daily_limits(api, author, code)
     if limit:
         return wait(limit)

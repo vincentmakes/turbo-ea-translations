@@ -65,6 +65,10 @@ MAX_PR_COMMITS = 100
 #: Automatic merges per author and per language in 24 hours.
 MAX_MERGES_PER_AUTHOR_PER_DAY = 10
 MAX_MERGES_PER_LANGUAGE_PER_DAY = 5
+#: A new language needs at least this share of the interface strings of the
+#: Turbo EA version it was exported from (percent), on top of the repository
+#: owner's approval.
+MIN_NEW_LANGUAGE_COVERAGE = 50.0
 #: Deepest JSON nesting a pack needs is 3 (pack > strings > namespace); the
 #: limit leaves room and keeps the parser far from recursion limits.
 MAX_JSON_DEPTH = 8
@@ -492,6 +496,8 @@ class Decision:
     action: str  # "merge" | "wait" | "skip"
     reason: str
     new_language: bool = False
+    #: Logins whose review the PR is waiting for (validated logins only).
+    ask: tuple[str, ...] = ()
 
 
 def decide(
@@ -504,11 +510,14 @@ def decide(
     reviews: Iterable[Mapping[str, Any]],
     head_sha: str,
     owner_id: Any = None,
+    owner_login: Any = None,
 ) -> Decision:
     """The merge policy for a contribution that passed validation.
 
-    * New language (no ``packs/<code>/`` on the default branch): merge; the
-      author becomes its first maintainer.
+    * New language (no ``packs/<code>/`` on the default branch): merges once
+      the repository owner has approved this exact head commit (or is the
+      author); the author becomes its first maintainer. The minimum coverage
+      is enforced by the caller, which knows the English text.
     * Existing language, author is a maintainer: merge (even if a
       co-maintainer asked for changes: maintainers are peers).
     * Existing language, otherwise: merge once a maintainer other than the
@@ -522,30 +531,71 @@ def decide(
     if not is_login(author) or not is_user_id(author_id):
         return Decision("skip", "the author is not a plain GitHub user account; left for the owner")
     own_branch = isinstance(head_owner, str) and head_owner.lower() == author.lower()
+    owner = owner_login if is_user_id(owner_id) and is_login(owner_login) else None
+    latest = latest_reviews(reviews)
+
+    def verdict_of(uid: Any) -> str | None:
+        review = latest.get(uid)
+        if review is None:
+            return None
+        if review.get("state") == "APPROVED" and review.get("commit_id") != head_sha:
+            return "STALE"
+        return review.get("state")
+
     if not language_exists:
         if not own_branch:
             return Decision("wait", "a new language must come from a branch in the author's own fork; "
                             "left for the owner")
-        return Decision("merge", "new language: merges automatically, the author becomes its maintainer", True)
+        if owner is None:
+            return Decision("wait", "a new language needs the repository owner's approval, and the owner "
+                            "is not a user account; left for the owner")
+        if author_id == owner_id or verdict_of(owner_id) == "APPROVED":
+            return Decision("merge", "new language approved by the repository owner; the author becomes "
+                            "its maintainer", True)
+        if verdict_of(owner_id) == "CHANGES_REQUESTED":
+            return Decision("wait", "the repository owner requested changes", True)
+        return Decision("wait", "a new language waits for the repository owner's approving review of the "
+                        "latest commit", True, (owner,))
     deciders = {m.user_id: m.login for m in maintainers}
-    if is_user_id(owner_id):
-        deciders.setdefault(owner_id, "the repository owner")
+    if owner is not None:
+        deciders.setdefault(owner_id, owner)
     if own_branch and author_id in deciders:
         return Decision("merge", f"{author} maintains this language")
     approvers: list[str] = []
-    for uid, review in latest_reviews(reviews).items():
+    for uid in latest:
         if uid == author_id or uid not in deciders:
             continue
-        if review.get("state") == "CHANGES_REQUESTED":
+        state = verdict_of(uid)
+        if state == "CHANGES_REQUESTED":
             return Decision("wait", f"maintainer {deciders[uid]} requested changes")
-        if review.get("state") == "APPROVED" and review.get("commit_id") == head_sha:
+        if state == "APPROVED":
             approvers.append(deciders[uid])
     if approvers:
         return Decision("merge", "approved by maintainer " + ", ".join(sorted(approvers)))
-    if not maintainers:
-        return Decision("wait", "this language has no maintainer listed; waiting for the repository owner")
+    listed = [m.login for m in maintainers if m.user_id != author_id]
+    if not listed:
+        return Decision("wait", "this language has no other maintainer; waiting for the repository owner",
+                        ask=(owner,) if owner else ())
     return Decision("wait", "waiting for an approving review of the latest commit from a maintainer: "
-                    + ", ".join(sorted(m.login for m in maintainers)))
+                    + ", ".join(sorted(listed)), ask=tuple(sorted(listed)))
+
+
+def waiting_comment(number: str, head_sha: str, decision: Decision, marker: str) -> str:
+    """The bot's comment for a PR waiting for reviews: fixed text, validated
+    logins and the head SHA only (no PR-controlled text)."""
+    if not decision.ask or not all(is_login(login) for login in decision.ask) or not is_sha(head_sha):
+        raise ValueError("nothing to ask, or an invalid login")
+    who = " ".join(f"@{login}" for login in decision.ask)
+    what = ("This new language needs an approving review from the repository owner."
+            if decision.new_language else
+            "This change to the language needs an approving review from one of its maintainers.")
+    return (
+        f"{marker}\n"
+        f"{who}: the checks passed for `{head_sha[:12]}`. {what} "
+        "Approve the pull request (Files changed \u2192 Review changes \u2192 Approve) and it merges "
+        "automatically; request changes to stop it. New commits need a new approval.\n\n"
+        "_Posted by the repository's automation._"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +634,7 @@ def pack_stats(pack: Mapping[str, Any], english: Mapping[str, Mapping[str, str]]
     if english is None:
         return stats
     total = sum(len(ns) for ns in english.values())
-    translated = current = 0
+    translated = current = identical = 0
     for ns_name, ns in english.items():
         entries = strings.get(ns_name)
         ns_hashes = hashes.get(ns_name) if isinstance(hashes.get(ns_name), Mapping) else {}
@@ -596,11 +646,14 @@ def pack_stats(pack: Mapping[str, Any], english: Mapping[str, Mapping[str, str]]
                 translated += 1
                 if ns_hashes.get(key) == source_hash(text):
                     current += 1
+                if value == text:
+                    identical += 1
     stats.update(
         {
             "english_strings": total,
             "translated": translated,
             "current": current,
+            "identical_to_english": identical,
             "coverage": round(100.0 * translated / total, 1) if total else 0.0,
         }
     )

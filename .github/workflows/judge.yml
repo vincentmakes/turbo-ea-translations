@@ -53,6 +53,7 @@ jobs:
       code: ${{ steps.inspect.outputs.code }}
       blob_sha: ${{ steps.inspect.outputs.blob_sha }}
       head_sha: ${{ steps.inspect.outputs.head_sha }}
+      coverage: ${{ steps.validate.outputs.coverage }}
     steps:
       - name: Get the judging scripts from the base branch
         env:
@@ -72,9 +73,11 @@ jobs:
         run: python3 "$RUNNER_TEMP/judge/scripts/judge.py" inspect --out "$RUNNER_TEMP/pack"
 
       - name: Validate with turbo-ea's language_pack.py (no token)
+        id: validate
         if: steps.inspect.outputs.kind == 'contribution'
         env:
           APP_VERSION: ${{ steps.inspect.outputs.app_version }}
+          NEW_LANGUAGE: ${{ steps.inspect.outputs.new_language }}
           # Optional, set by the owner under Settings > Variables: a full
           # turbo-ea commit SHA to validate against instead of the release tag.
           TURBO_EA_VALIDATOR_SHA: ${{ vars.TURBO_EA_VALIDATOR_SHA }}
@@ -101,7 +104,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write       # merge, write MAINTAINERS for a new language
-      pull-requests: write  # merge
+      pull-requests: write  # merge, comment asking maintainers / the owner for a review
       actions: write        # start registry.yml (index.json)
     steps:
       - name: Get the judging scripts from the base branch
@@ -120,4 +123,5 @@ jobs:
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
           CODE: ${{ needs.validate.outputs.code }}
           BLOB_SHA: ${{ needs.validate.outputs.blob_sha }}
+          COVERAGE: ${{ needs.validate.outputs.coverage }}
         run: python3 "$RUNNER_TEMP/judge/scripts/judge.py" merge

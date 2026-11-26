@@ -55,10 +55,11 @@ file you had translated elsewhere). Then:
 The full step-by-step guide, what the check verifies and how maintainers work
 are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**In short:** a new language merges automatically once it passes the check, and
-its author becomes its maintainer. Changes to an existing language merge
-automatically when they come from one of its maintainers, or once a maintainer
-approves them.
+**In short:** a new language needs at least half of the interface translated
+and the repository owner's approval; it then merges automatically and its author
+becomes its maintainer. Changes to an existing language merge automatically
+when they come from one of its maintainers, or once a maintainer approves them.
+The bot mentions whoever has to approve.
 
 ## Layout
 
@@ -103,6 +104,8 @@ The automation relies on these settings; each line says why.
 
 ## Licence
 
-This repository does not have a licence yet; the owner has to choose one. Until
-a licence file is added here, no licence to the packs is granted beyond what
-GitHub's Terms of Service allow.
+Everything in this repository — the packs, the scripts and the documentation —
+is published under the [MIT licence](LICENSE). By opening a pull request you
+agree that your contribution is published under it. The packs translate the
+English text of Turbo EA, which is itself licensed under FSL-1.1-MIT by the same
+copyright holder.

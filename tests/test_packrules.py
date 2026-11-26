@@ -215,15 +215,34 @@ def review(login, state, commit=HEAD, user_id=None):
 class Decide(unittest.TestCase):
     def d(self, **kw):
         args = dict(author="zed", author_id=26, head_owner=None, language_exists=True,
-                    maintainers=[M("alice", 1), M("bob", 2)], reviews=[], head_sha=HEAD, owner_id=None)
+                    maintainers=[M("alice", 1), M("bob", 2)], reviews=[], head_sha=HEAD, owner_id=99,
+                    owner_login="owner")
         args.update(kw)
         if args["head_owner"] is None:
             args["head_owner"] = args["author"]
         return packrules.decide(**args)
 
-    def test_new_language_merges(self):
+    def test_new_language_waits_for_owner_approval(self):
         decision = self.d(language_exists=False, maintainers=[])
+        self.assertEqual((decision.action, decision.new_language, decision.ask), ("wait", True, ("owner",)))
+        decision = self.d(language_exists=False, maintainers=[], reviews=[review("owner", "APPROVED")])
         self.assertEqual((decision.action, decision.new_language), ("merge", True))
+
+    def test_new_language_owner_approval_must_be_current_and_standing(self):
+        stale = [review("owner", "APPROVED", "b" * 40)]
+        self.assertEqual(self.d(language_exists=False, reviews=stale).action, "wait")
+        objected = [review("owner", "APPROVED"), review("owner", "CHANGES_REQUESTED")]
+        self.assertEqual(self.d(language_exists=False, reviews=objected).action, "wait")
+        others = [review("alice", "APPROVED"), review("bob", "APPROVED")]
+        self.assertEqual(self.d(language_exists=False, reviews=others).action, "wait")
+
+    def test_new_language_from_the_owner_merges(self):
+        decision = self.d(author="owner", author_id=99, language_exists=False)
+        self.assertEqual((decision.action, decision.new_language), ("merge", True))
+
+    def test_new_language_with_an_organisation_owner_waits(self):
+        decision = self.d(language_exists=False, owner_id=None, reviews=[review("owner", "APPROVED")])
+        self.assertEqual((decision.action, decision.ask), ("wait", ()))
 
     def test_new_language_from_someone_elses_branch_waits(self):
         self.assertEqual(self.d(language_exists=False, maintainers=[], head_owner="mallory").action, "wait")
@@ -255,13 +274,23 @@ class Decide(unittest.TestCase):
 
     def test_other_author_waits_and_names_maintainers(self):
         decision = self.d()
-        self.assertEqual(decision.action, "wait")
+        self.assertEqual((decision.action, decision.ask), ("wait", ("alice", "bob")))
         self.assertIn("alice", decision.reason)
 
+    def test_waiting_comment(self):
+        decision = self.d()
+        body = packrules.waiting_comment("7", HEAD, decision, "<!-- m -->")
+        self.assertTrue(body.startswith("<!-- m -->\n@alice @bob: "))
+        self.assertIn(HEAD[:12], body)
+        with self.assertRaises(ValueError):
+            packrules.waiting_comment("7", HEAD, packrules.Decision("wait", "x", ask=("a b",)), "m")
+        with self.assertRaises(ValueError):
+            packrules.waiting_comment("7", HEAD, packrules.Decision("wait", "x"), "m")
+
     def test_no_maintainers_waits_for_owner(self):
-        self.assertEqual(self.d(maintainers=[], reviews=[review("alice", "APPROVED")]).action, "wait")
-        self.assertEqual(self.d(maintainers=[], owner_id=99, reviews=[review("owner", "APPROVED")]).action,
-                         "merge")
+        decision = self.d(maintainers=[], reviews=[review("alice", "APPROVED")])
+        self.assertEqual((decision.action, decision.ask), ("wait", ("owner",)))
+        self.assertEqual(self.d(maintainers=[], reviews=[review("owner", "APPROVED")]).action, "merge")
 
     def test_owner_is_an_implicit_maintainer(self):
         self.assertEqual(self.d(author="owner", author_id=99, owner_id=99).action, "merge")

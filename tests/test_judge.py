@@ -62,6 +62,7 @@ class FakeApi:
         self.pr.update(pr or {})
         self.reviews = list(reviews)
         self.reviews_complete = True
+        self.comments = []
         self.commits = commits if commits is not None else [{"sha": HEAD, "parents": [{"sha": BASE}]}]
         self.search_count = search_count
         self.language_commits = language_commits
@@ -120,6 +121,8 @@ class FakeApi:
 
 
     def paginate_complete(self, path, limit=1000, **params):
+        if path == "/repos/o/r/issues/7/comments":
+            return self.comments, True
         assert path == "/repos/o/r/pulls/7/reviews"
         return self.reviews, self.reviews_complete
 
@@ -142,6 +145,9 @@ class FakeApi:
             assert kw["params"]["path"] == "packs/nl/pack.json"
             return [{}] * self.language_commits
         self.calls.append((method, path, kw.get("body")))
+        if path == "/repos/o/r/issues/7/comments":
+            self.comments.append({"body": kw["body"]["body"], "user": {"login": "github-actions[bot]"}})
+            return {}
         if path.endswith("/merge"):
             return {"merged": True, "sha": MERGED}
         return {}
@@ -277,13 +283,16 @@ class Inspect(Base):
 EXISTING = {"packs/nl/pack.json": blob(pack_bytes(instructions="old"))}
 
 
+OWNER_OK = [{"user": {"login": "o", "id": OWNER_ID}, "state": "APPROVED", "commit_id": HEAD}]
+
+
 class Merge(Base):
-    def merge(self, api, data):
-        env = {"CODE": "nl", "BLOB_SHA": packrules.git_blob_sha(data)}
+    def merge(self, api, data, coverage="80.0"):
+        env = {"CODE": "nl", "BLOB_SHA": packrules.git_blob_sha(data), "COVERAGE": coverage}
         return self.run_cmd(api, judge.cmd_merge, env)
 
     def paths(self, api):
-        return [p for _, p, _ in api.calls]
+        return [p for _, p, _ in api.calls if not p.endswith("/issues/7/comments")]
 
     def update(self, maintainers=b"bob 2\n", **kw):
         data = pack_bytes()
@@ -292,9 +301,26 @@ class Merge(Base):
         api = FakeApi(files=files, head={"packs/nl/pack.json": blob(data)}, main=main, **kw)
         return api, data
 
-    def test_new_language_reserves_maintainer_then_merges(self):
+    def test_new_language_waits_for_owner_and_asks_once(self):
         data = pack_bytes()
         api = FakeApi(files=NEW, head={"packs/nl/pack.json": blob(data)}, main={})
+        self.merge(api, data)
+        self.merge(api, data)  # a second run (sweep) must not comment again
+        self.assertEqual(self.paths(api), [])
+        self.assertEqual(len(api.comments), 1)
+        self.assertIn("@o:", api.comments[0]["body"])
+        self.assertIn(HEAD, api.comments[0]["body"])  # in the marker
+
+    def test_new_language_below_minimum_coverage_waits(self):
+        data = pack_bytes()
+        api = FakeApi(files=NEW, head={"packs/nl/pack.json": blob(data)}, main={}, reviews=OWNER_OK)
+        for coverage in ("10.0", "", "nan-ish"):
+            self.merge(api, data, coverage=coverage)
+        self.assertEqual(self.paths(api), [])
+
+    def test_new_language_reserves_maintainer_then_merges(self):
+        data = pack_bytes()
+        api = FakeApi(files=NEW, head={"packs/nl/pack.json": blob(data)}, main={}, reviews=OWNER_OK)
         code, _, _ = self.merge(api, data)
         self.assertEqual(code, 0, self.summary_text())
         self.assertEqual(self.paths(api)[:2], ["packs/nl/MAINTAINERS", "/repos/o/r/pulls/7/merge"])
@@ -308,8 +334,22 @@ class Merge(Base):
     def test_existing_language_non_maintainer_waits(self):
         api, data = self.update()
         self.assertEqual(self.merge(api, data)[0], 0)
-        self.assertEqual(api.calls, [])
+        self.assertEqual(self.paths(api), [])
         self.assertIn("bob", self.summary_text())  # names the maintainers to ask
+        self.assertEqual(len(api.comments), 1)
+        self.assertIn("@bob", api.comments[0]["body"])
+
+    def test_comment_failure_is_not_fatal(self):
+        api, data = self.update()
+        real = api.request
+
+        def refuse(method, path, **kw):
+            if path.endswith("/issues/7/comments"):
+                raise gh_api.ApiError(403, "Resource not accessible by integration")
+            return real(method, path, **kw)
+
+        api.request = refuse
+        self.assertEqual(self.merge(api, data)[0], 0)
 
     def test_existing_language_maintainer_merges_without_new_maintainers(self):
         api, data = self.update(maintainers=b"alice 1\n")
@@ -323,7 +363,7 @@ class Merge(Base):
         self.assertIn("/repos/o/r/pulls/7/merge", self.paths(api))
         api, data = self.update(maintainers=b"alice 555\n")
         self.merge(api, data)
-        self.assertEqual(api.calls, [])
+        self.assertEqual(self.paths(api), [])
 
     def test_maintainer_approval_merges(self):
         api, data = self.update(reviews=[{"user": {"login": "bob", "id": 2}, "state": "APPROVED",
@@ -407,13 +447,15 @@ class Merge(Base):
 
     def test_draft_is_not_merged(self):
         data = pack_bytes()
-        api = FakeApi(files=NEW, head={"packs/nl/pack.json": blob(data)}, main={}, pr={"draft": True})
+        api = FakeApi(files=NEW, head={"packs/nl/pack.json": blob(data)}, main={}, pr={"draft": True},
+                      reviews=OWNER_OK)
         self.merge(api, data)
         self.assertEqual(api.calls, [])
 
     def test_post_merge_extra_file_fails_loudly(self):
         api, data = self.update(maintainers=b"alice 1\n")
         api.trees[MERGED] = {**api.trees[MERGED], "scripts/judge.py": blob(b"reverted")}
+        api.reviews = OWNER_OK
         self.assertEqual(self.merge(api, data)[0], 1)
         self.assertIn("Post-merge check failed", self.summary_text())
         self.assertNotIn("/repos/o/r/actions/workflows/registry.yml/dispatches", self.paths(api))
@@ -443,7 +485,7 @@ class Merge(Base):
 
     def test_reservation_failure_blocks_merge(self):
         data = pack_bytes()
-        api = FakeApi(files=NEW, head={"packs/nl/pack.json": blob(data)}, main={})
+        api = FakeApi(files=NEW, head={"packs/nl/pack.json": blob(data)}, main={}, reviews=OWNER_OK)
 
         def refuse(*args):
             raise gh_api.ApiError(409, "protected branch")
@@ -492,7 +534,8 @@ class Validate(Base):
         got = {"validator": Path("v.py"), "english": Path("en"), "validator_label": "v2.300.0",
                "validator_sha": "1" * 40, "english_label": "v2.214.0", "english_sha": "2" * 40}
         with mock.patch("turbo_ea.prepare", return_value=got), \
-                mock.patch("turbo_ea.run_validator", return_value=(code, '"admin"\t"k"\tempty\n')):
+                mock.patch("turbo_ea.run_validator", return_value=(code, '"admin"\t"k"\tempty\n')), \
+                mock.patch.object(judge, "check_coverage", return_value=0):
             return self.run_cmd(None, lambda: judge.cmd_validate(Path("p.json"), Path("w")),
                                 {"APP_VERSION": "2.214.0"})[0]
 
@@ -510,6 +553,24 @@ class Validate(Base):
                                 {"APP_VERSION": "main"})[0]
         self.assertEqual(code, 1)
         prepare.assert_not_called()
+
+
+class Coverage(Base):
+    def coverage(self, new, translated):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(d))
+        (d / "en").mkdir()
+        (d / "en" / "common.json").write_text(json.dumps({f"k{i}": f"Text {i}" for i in range(10)}))
+        strings = {f"k{i}": f"Tekst {i}" for i in range(translated)}
+        (d / "p.json").write_bytes(pack_bytes(strings={"common": strings}, source_hashes={}))
+        return self.run_cmd(None, lambda: judge.check_coverage(d / "p.json", d / "en", "v2.214.0"),
+                            {"NEW_LANGUAGE": "true" if new else "false"})
+
+    def test_minimum_for_new_languages_only(self):
+        code, outputs, _ = self.coverage(new=True, translated=4)
+        self.assertEqual((code, outputs["coverage"]), (1, "40.0"))
+        self.assertEqual(self.coverage(new=True, translated=5)[0], 0)
+        self.assertEqual(self.coverage(new=False, translated=1)[0], 0)
 
 
 class Outputs(unittest.TestCase):
