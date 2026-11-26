@@ -3,6 +3,10 @@
 Thank you for translating Turbo EA. This page covers everything from exporting
 the file to how your pull request gets merged.
 
+> Using an AI assistant (Claude, Copilot, ChatGPT …) to translate the file or to
+> open the pull request? Give it [AGENTS.md](AGENTS.md): it lists the rules the
+> check enforces, so the result passes the first time.
+
 ## 1. What you need
 
 * A Turbo EA installation (a version with **Custom Languages**) where you are an

@@ -54,7 +54,8 @@ file you had translated elsewhere). Then:
    be done entirely in the GitHub web interface.
 
 The full step-by-step guide, what the check verifies and how maintainers work
-are in [CONTRIBUTING.md](CONTRIBUTING.md).
+are in [CONTRIBUTING.md](CONTRIBUTING.md). Using an AI assistant to translate or
+to open the pull request? Point it at [AGENTS.md](AGENTS.md) first.
 
 **In short:** a new language needs at least half of the interface translated
 and the repository owner's approval; it then merges automatically and its author
