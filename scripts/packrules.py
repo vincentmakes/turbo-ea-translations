@@ -52,25 +52,56 @@ _PR_NUMBER = re.compile(r"[1-9][0-9]{0,8}")
 #: as :data:`_CODE`, so ``..``, ``/``, ``\`` or a NUL can never match.
 _PACK_PATH = re.compile(r"packs/([a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-[A-Z]{2})?)/pack\.json")
 
-MAX_PACK_BYTES = 5 * 1024 * 1024
+#: A complete real pack is about 1 MB (2 MB in a script that takes 3 UTF-8
+#: bytes per character); the cap leaves room without inviting bulk data.
+MAX_PACK_BYTES = 3 * 1024 * 1024
+#: The built-in metamodel has a few hundred labels; invented keys beyond that
+#: would only be dead weight in every installation.
+MAX_METAMODEL_KEYS = 5000
+#: Commits a contribution PR may carry; each must have exactly one parent so
+#: the PR's history is a straight line from one commit of the default branch
+#: (one merge base: what is diffed is what a squash merge applies).
+MAX_PR_COMMITS = 100
+#: Automatic merges per author and per language in 24 hours.
+MAX_MERGES_PER_AUTHOR_PER_DAY = 10
+MAX_MERGES_PER_LANGUAGE_PER_DAY = 5
 #: Deepest JSON nesting a pack needs is 3 (pack > strings > namespace); the
 #: limit leaves room and keeps the parser far from recursion limits.
 MAX_JSON_DEPTH = 8
 MAX_KEY_LENGTH = 1000
+MAX_NAMESPACES = 50
+MAX_PROBLEMS = 50
 MAX_NATIVE_NAME_LENGTH = 60
 
 #: Git file modes. Only a regular, non-executable file is a pack.
 MODE_REGULAR = "100644"
 
-_BIDI_OVERRIDES = frozenset({"‭", "‮"})
+_BIDI_OVERRIDES = frozenset({"\u202d", "\u202e"})
 _INVISIBLE = frozenset(
-    "­​‌‍‎‏⁠⁦⁧⁨⁩﻿"
+    "\u00ad\u200b\u200c\u200d\u200e\u200f\u2060\u2066\u2067\u2068\u2069\ufeff"
 )
 
 
 # ---------------------------------------------------------------------------
 # Small validators
 # ---------------------------------------------------------------------------
+
+
+#: The validator's own patterns for markup and links (language_pack.py): what
+#: HTML reads as a tag opening, and a URL by scheme, ``www.`` or ``//host.tld``.
+_TAG_OPEN = re.compile(r"<[A-Za-z/!?]")
+_URL = re.compile(r"(?:https?://|www\.|(?<![:/\w])//[A-Za-z0-9\-]+\.[A-Za-z0-9\-])", re.IGNORECASE)
+
+
+def is_plain_text(text: str) -> bool:
+    """No tag opening, no link, no control character or bidi override: the
+    rules the validator applies to ``strings``, for the free-text header
+    fields it does not look at (``locale.name``, ``instructions``)."""
+    return not (_TAG_OPEN.search(text) or _URL.search(text) or has_forbidden_chars(text))
+
+
+def is_user_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 10**12
 
 
 def code_problem(code: Any) -> str | None:
@@ -118,7 +149,7 @@ def is_valid_native_name(name: Any) -> bool:
         and not all(ch.isspace() or ch in _INVISIBLE for ch in name)
         and "\n" not in name
         and "\t" not in name
-        and not has_forbidden_chars(name)
+        and is_plain_text(name)
     )
 
 
@@ -152,9 +183,10 @@ class ChangeVerdict:
     """What a pull request's file list makes of it.
 
     ``kind`` is ``contribution`` (exactly one ``packs/<code>/pack.json`` added
-    or modified), ``invalid`` (it touches ``packs/`` but breaks the rule: the
-    contributor has to fix it) or ``other`` (it does not touch ``packs/`` at
-    all: repository work for the owner, not judged here)."""
+    or modified), ``invalid`` (it touches a pack file but breaks the rule: the
+    contributor has to fix it) or ``other`` (it touches no pack file at all —
+    a MAINTAINERS change, docs, scripts: work for the owner, not judged here
+    and never merged automatically)."""
 
     kind: str
     code: str | None = None
@@ -175,9 +207,9 @@ def classify_changes(files: list[Mapping[str, Any]], total_files: int | None = N
             if isinstance(value, str):
                 names.append(value)
     count = max(len(files), total_files or 0)
-    touches_packs = any(n == "packs" or n.startswith("packs/") for n in names)
-    if not touches_packs:
-        return ChangeVerdict("other", reason="does not change packs/; not a pack contribution")
+    touches_a_pack = any(n.startswith("packs/") and "pack.json" in n.lower() for n in names)
+    if not touches_a_pack:
+        return ChangeVerdict("other", reason="changes no pack.json; not a pack contribution")
     if count != 1 or len(files) != 1:
         return ChangeVerdict(
             "invalid",
@@ -202,6 +234,41 @@ def classify_changes(files: list[Mapping[str, Any]], total_files: int | None = N
     if problem is not None:
         return ChangeVerdict("invalid", reason=f"folder name is not an accepted language code ({problem})")
     return ChangeVerdict("contribution", code=code, path=filename)
+
+
+def history_problem(compare: Mapping[str, Any]) -> str | None:
+    """Why a PR's commits (from a ``compare`` response) are not a straight
+    line, or ``None``.
+
+    Every commit must have exactly one parent, and the list must be complete.
+    With a merge commit in the PR, the head can have several merge bases with
+    the default branch; GitHub's three-dot diff then shows one base's view
+    while the squash merge uses a virtual base and can silently revert or
+    delete files the diff never showed."""
+    total = compare.get("total_commits")
+    commits = compare.get("commits")
+    if not isinstance(total, int) or not isinstance(commits, list):
+        return "the PR's commit list is unavailable"
+    if total > MAX_PR_COMMITS:
+        return f"the PR has {total} commits; at most {MAX_PR_COMMITS} (squash them, or open a new PR)"
+    if len(commits) != total:
+        return "the PR's commit list is incomplete"
+    for commit in commits:
+        parents = commit.get("parents") if isinstance(commit, Mapping) else None
+        if not isinstance(parents, list) or len(parents) != 1:
+            return ("the PR contains a merge commit; update your branch by rebasing "
+                    "(or open a new PR from the current default branch), not with a merge")
+    return None
+
+
+def differing_entries(a: Iterable[Mapping[str, Any]], b: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Names whose entry (mode, type, object id) differs between two git tree
+    listings, including names present in only one of them."""
+    def index(entries: Iterable[Mapping[str, Any]]) -> dict[str, tuple[Any, Any, Any]]:
+        return {e.get("path"): (e.get("mode"), e.get("type"), e.get("sha")) for e in entries}
+
+    ia, ib = index(a), index(b)
+    return {name for name in set(ia) | set(ib) if ia.get(name) != ib.get(name)}
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +324,10 @@ def parse_pack_bytes(data: bytes) -> dict[str, Any]:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise PackError("pack is not valid UTF-8") from exc
-    if text.startswith("﻿"):
-        text = text[1:]
+    if text.startswith("\ufeff"):
+        # turbo-ea's validator refuses a byte-order mark too (it cannot read
+        # the file); a fresh export never has one.
+        raise PackError("pack starts with a byte-order mark; save it as UTF-8 without BOM")
     if not json_depth_ok(text):
         raise PackError(f"JSON nests deeper than {MAX_JSON_DEPTH} levels")
     try:
@@ -282,7 +351,7 @@ def header_problems(pack: Mapping[str, Any], folder_code: str | None) -> list[st
         problems.append("unknown top-level key(s): " + ", ".join(json.dumps(k)[:40] for k in extra[:5]))
     if pack.get("format") != PACK_FORMAT:
         problems.append(f'"format" must be "{PACK_FORMAT}"')
-    if pack.get("format_version") != PACK_FORMAT_VERSION or isinstance(pack.get("format_version"), bool):
+    if type(pack.get("format_version")) is not int or pack.get("format_version") != PACK_FORMAT_VERSION:
         problems.append(f'"format_version" must be {PACK_FORMAT_VERSION}')
     if not is_version(pack.get("app_version")):
         problems.append('"app_version" must be a plain version such as "2.214.0"')
@@ -292,8 +361,11 @@ def header_problems(pack: Mapping[str, Any], folder_code: str | None) -> list[st
             "Admin > Settings > Custom Languages"
         )
     instructions = pack.get("instructions")
-    if instructions is not None and not (isinstance(instructions, str) and len(instructions) <= 5000):
-        problems.append('"instructions" must be a string of at most 5000 characters')
+    if instructions is not None and not (
+        isinstance(instructions, str) and len(instructions) <= 2000 and is_plain_text(instructions)
+    ):
+        problems.append('"instructions" must be the plain text of the export: at most 2000 characters, '
+                        "no markup, no links, no control characters")
     locale = pack.get("locale")
     if not isinstance(locale, dict):
         problems.append('"locale" must be an object')
@@ -311,7 +383,8 @@ def header_problems(pack: Mapping[str, Any], folder_code: str | None) -> list[st
     elif folder_code is not None and code != folder_code:
         problems.append(f"locale.code {code!r} does not match the folder packs/{folder_code}/")
     if not is_valid_native_name(locale.get("name")):
-        problems.append("locale.name must be the language's own name: one line, at most 60 characters")
+        problems.append("locale.name must be the language's own name: one line, at most 60 characters, "
+                        "no markup or links")
     if not is_valid_english_name(locale.get("english_name")):
         problems.append("locale.english_name must be 2-60 letters, spaces, brackets or dashes")
     if not isinstance(locale.get("rtl"), bool):
@@ -332,9 +405,16 @@ def header_problems(pack: Mapping[str, Any], folder_code: str | None) -> list[st
                 if section == "source_hashes" and not (isinstance(item, str) and _HASH12.fullmatch(item)):
                     problems.append(f'"source_hashes".{json.dumps(ns)[:40]} holds a value that is not a 12-hex hash')
                     break
+        if isinstance(value, dict) and len(value) > MAX_NAMESPACES:
+            problems.append(f'"{section}" has {len(value)} namespaces; Turbo EA has fewer than {MAX_NAMESPACES}')
     strings = pack.get("strings")
     if isinstance(strings, dict) and not any(isinstance(v, dict) and v for v in strings.values()):
         problems.append('"strings" is empty')
+    metamodel = strings.get("metamodel") if isinstance(strings, dict) else None
+    if isinstance(metamodel, dict) and len(metamodel) > MAX_METAMODEL_KEYS:
+        problems.append(f'"strings".metamodel has {len(metamodel)} keys; at most {MAX_METAMODEL_KEYS}')
+    if len(problems) > MAX_PROBLEMS:
+        problems = problems[:MAX_PROBLEMS] + [f"… and {len(problems) - MAX_PROBLEMS} more"]
     return problems
 
 
@@ -345,46 +425,48 @@ def header_problems(pack: Mapping[str, Any], folder_code: str | None) -> list[st
 
 @dataclass(frozen=True)
 class Maintainer:
+    """A language's maintainer. ``user_id`` is GitHub's numeric account id and
+    is what identifies them: a login can be renamed (the role stays with the
+    account) and a freed login can be registered by someone else (who gets
+    nothing). ``login`` is kept for display."""
+
     login: str
-    #: GitHub's numeric user id. A login can be renamed and then registered by
-    #: someone else; the id cannot. ``None`` for a line written without one.
-    user_id: int | None = None
+    user_id: int
 
-    def is_user(self, login: Any, user_id: Any) -> bool:
-        if not isinstance(login, str) or login.lower() != self.login.lower():
-            return False
-        return self.user_id is None or (isinstance(user_id, int) and user_id == self.user_id)
+    def is_user(self, user_id: Any) -> bool:
+        return is_user_id(user_id) and user_id == self.user_id
 
 
-def parse_maintainers(text: str) -> list[Maintainer]:
-    """Maintainers from a MAINTAINERS file: one per line as ``login`` or
+def parse_maintainers(text: str) -> tuple[list[Maintainer], int]:
+    """``(maintainers, ignored)`` from a MAINTAINERS file: one per line as
     ``login <numeric user id>``; ``#`` starts a comment, blank lines are
-    ignored, a leading ``@`` is tolerated. A malformed line is ignored (it can
-    never match a real user)."""
+    skipped, a leading ``@`` is tolerated. A line without a valid id, or any
+    other malformed line, is ignored and counted in ``ignored`` so the
+    check's summary can point it out."""
     found: list[Maintainer] = []
-    seen: set[str] = set()
+    seen: set[int] = set()
+    ignored = 0
     for raw in text.splitlines():
         parts = raw.split("#", 1)[0].split()
-        if not parts or len(parts) > 2:
+        if not parts:
             continue
         login = parts[0][1:] if parts[0].startswith("@") else parts[0]
-        user_id: int | None = None
-        if len(parts) == 2:
-            if not parts[1].isascii() or not parts[1].isdigit() or len(parts[1]) > 12:
-                continue
-            user_id = int(parts[1])
-        if is_login(login) and login.lower() not in seen:
-            seen.add(login.lower())
-            found.append(Maintainer(login, user_id))
-    return found
+        uid = parts[1] if len(parts) == 2 else ""
+        if not (is_login(login) and uid.isascii() and uid.isdigit() and len(uid) <= 12 and int(uid) > 0):
+            ignored += 1
+            continue
+        if int(uid) not in seen:
+            seen.add(int(uid))
+            found.append(Maintainer(login, int(uid)))
+    return found, ignored
 
 
 def maintainers_file(code: str, login: str, user_id: int) -> str:
-    if code_problem(code) is not None or not is_login(login) or not isinstance(user_id, int) or user_id <= 0:
+    if code_problem(code) is not None or not is_login(login) or not is_user_id(user_id):
         raise ValueError("bad code, login or user id")
     return (
-        f"# Maintainers of the {code} language pack, one per line: GitHub login and numeric user id\n"
-        "# (https://api.github.com/users/<login> shows the id; a line without an id matches the login only).\n"
+        f"# Maintainers of the {code} language pack, one per line: GitHub login and numeric user id.\n"
+        "# The id is what counts (https://api.github.com/users/<login> shows it); a line without one is ignored.\n"
         "# A pull request from a maintainer merges automatically once it passes the checks;\n"
         "# any other change to this pack needs an approving review from a maintainer.\n"
         "# Changes to this file are made by the repository owner.\n"
@@ -392,17 +474,16 @@ def maintainers_file(code: str, login: str, user_id: int) -> str:
     )
 
 
-def latest_reviews(reviews: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
-    """Each reviewer's last state-changing review (lower-cased login → review).
+def latest_reviews(reviews: Iterable[Mapping[str, Any]]) -> dict[int, Mapping[str, Any]]:
+    """Each reviewer's last state-changing review, by numeric user id.
     Plain comments do not change a reviewer's verdict."""
-    latest: dict[str, Mapping[str, Any]] = {}
+    latest: dict[int, Mapping[str, Any]] = {}
     for review in reviews:
-        user = review.get("user") or {}
-        login = user.get("login") if isinstance(user, Mapping) else None
-        state = review.get("state")
-        if not is_login(login) or state not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+        user = review.get("user")
+        uid = user.get("id") if isinstance(user, Mapping) else None
+        if not is_user_id(uid) or review.get("state") not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             continue
-        latest[login.lower()] = review
+        latest[uid] = review
     return latest
 
 
@@ -422,21 +503,23 @@ def decide(
     maintainers: list[Maintainer],
     reviews: Iterable[Mapping[str, Any]],
     head_sha: str,
+    owner_id: Any = None,
 ) -> Decision:
     """The merge policy for a contribution that passed validation.
 
     * New language (no ``packs/<code>/`` on the default branch): merge; the
       author becomes its first maintainer.
-    * Existing language, author listed in MAINTAINERS (login and, when
-      recorded, user id): merge.
-    * Existing language, otherwise: merge once a listed maintainer other than
-      the author has approved this exact head commit and no listed maintainer's
-      latest review requests changes; else wait.
+    * Existing language, author is a maintainer: merge (even if a
+      co-maintainer asked for changes: maintainers are peers).
+    * Existing language, otherwise: merge once a maintainer other than the
+      author has approved this exact head commit and no maintainer's latest
+      review requests changes; else wait.
 
-    The first two need the PR's branch to live in the author's own fork
-    (``head_owner``): otherwise whoever can push to that branch would get their
-    commits merged on the author's standing."""
-    if not is_login(author) or not isinstance(author_id, int):
+    The repository owner (``owner_id``) counts as a maintainer of every
+    language. Merging on the author's own standing needs the PR's branch to
+    live in the author's own fork (``head_owner``): otherwise whoever can push
+    to that branch would get their commits merged under the author's name."""
+    if not is_login(author) or not is_user_id(author_id):
         return Decision("skip", "the author is not a plain GitHub user account; left for the owner")
     own_branch = isinstance(head_owner, str) and head_owner.lower() == author.lower()
     if not language_exists:
@@ -444,21 +527,23 @@ def decide(
             return Decision("wait", "a new language must come from a branch in the author's own fork; "
                             "left for the owner")
         return Decision("merge", "new language: merges automatically, the author becomes its maintainer", True)
-    if own_branch and any(m.is_user(author, author_id) for m in maintainers):
+    deciders = {m.user_id: m.login for m in maintainers}
+    if is_user_id(owner_id):
+        deciders.setdefault(owner_id, "the repository owner")
+    if own_branch and author_id in deciders:
         return Decision("merge", f"{author} maintains this language")
-    if not maintainers:
-        return Decision("wait", "this language has no maintainer listed; the owner has to review it")
     approvers: list[str] = []
-    for login, review in latest_reviews(reviews).items():
-        user = review.get("user") or {}
-        if login == author.lower() or not any(m.is_user(login, user.get("id")) for m in maintainers):
+    for uid, review in latest_reviews(reviews).items():
+        if uid == author_id or uid not in deciders:
             continue
         if review.get("state") == "CHANGES_REQUESTED":
-            return Decision("wait", f"maintainer {login} requested changes")
+            return Decision("wait", f"maintainer {deciders[uid]} requested changes")
         if review.get("state") == "APPROVED" and review.get("commit_id") == head_sha:
-            approvers.append(login)
+            approvers.append(deciders[uid])
     if approvers:
         return Decision("merge", "approved by maintainer " + ", ".join(sorted(approvers)))
+    if not maintainers:
+        return Decision("wait", "this language has no maintainer listed; waiting for the repository owner")
     return Decision("wait", "waiting for an approving review of the latest commit from a maintainer: "
                     + ", ".join(sorted(m.login for m in maintainers)))
 

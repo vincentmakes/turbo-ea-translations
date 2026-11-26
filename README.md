@@ -12,11 +12,13 @@ the built-in metamodel. This repository collects those packs so that every
 Turbo EA installation can use them.
 
 > **Packs are provided by the community and are not reviewed by the Turbo EA
-> project.** Each pack is checked automatically (see below) — the check makes
-> sure a pack is well-formed and cannot inject markup, links or broken
-> placeholders, but nobody checks the quality or the accuracy of the
-> translations. Look at a pack in Turbo EA's **Review strings** screen before
-> you offer it to your users.
+> project.** Each pack is checked automatically (see below): the translated
+> strings cannot add markup, links or broken placeholders that the English text
+> does not have, and the few free-text header fields (the language's native name
+> and the export's instructions) cannot contain markup or links. Nobody checks
+> the quality or the accuracy of the translations, and a pack may be very
+> incomplete. Look at a pack in Turbo EA's **Review strings** screen before you
+> offer it to your users.
 
 ## Using a pack
 
@@ -32,9 +34,10 @@ strings that changed since are marked *changed in English*, and anything the
 pack does not have yet is shown in English.
 
 [`index.json`](index.json) lists every pack with its language, the Turbo EA
-version it was made with, string counts, coverage and SHA-256. It is generated
-automatically after each merge; a future Turbo EA version will use it to list
-and install packs directly.
+version it was made with, string counts, coverage, the SHA-256 of the file and
+the commit it was last changed in. It is generated automatically after each
+merge; a future Turbo EA version will use it to list and install packs
+directly.
 
 ## Contributing a pack
 
@@ -61,11 +64,42 @@ approves them.
 
 ```
 packs/<code>/pack.json     the language pack (the only file contributors change)
-packs/<code>/MAINTAINERS   GitHub logins of the language's maintainers (automation / owner)
+packs/<code>/MAINTAINERS   the language's maintainers: GitHub login + numeric user id (automation / owner)
 index.json                 generated list of all packs (automation)
 scripts/                   the checks, and check_pack.py to run them on your machine
 .github/workflows/         the automation
 ```
+
+## Repository settings (for the owner)
+
+The automation relies on these settings; each line says why.
+
+* **Merging:** allow **squash merging only** (Settings → General → Pull
+  Requests). The bot squash-merges; a merge commit on `main` is what could give
+  a crafted pull request two merge bases.
+* **Ruleset on `main`** (Settings → Rules), applied to everyone including
+  admins: **require linear history**, block **force pushes** and **deletion**.
+  Do **not** require pull requests, status checks, reviews or code-owner reviews
+  on `main`: the bot commits `MAINTAINERS` and `index.json` directly, and
+  required reviews would mean you approve everything. Never make the
+  path-filtered *Tests* check or *judge / merge* a required check (they do not
+  run on every pull request).
+* **No collaborators with write access.** Anyone with write can push to
+  `.github/`, run the Sweep from their own branch with a write token, and edit
+  `MAINTAINERS`. Contributors work from forks and need no access.
+* **Actions → General:** workflow permissions can stay *read*; the workflows
+  ask for write explicitly where needed. "Allow GitHub Actions to create and
+  approve pull requests" is not needed. The approval setting for first-time
+  contributors does not gate the pack check (`pull_request_target`); it does
+  gate the *Tests* workflow and possibly the review relay (a maintainer's
+  approval then takes effect at the daily sweep).
+* **Scheduled workflows** (Sweep, Registry) are switched off by GitHub after 60
+  days without repository activity; switch them back on in the Actions tab.
+* **Until Turbo EA ships `language_pack.py`** in a release (or on `main`), every
+  pack check fails with a clear message. To test earlier, set the repository
+  variable `TURBO_EA_VALIDATOR_SHA` to a turbo-ea commit that has it, and remove
+  it after the release.
+* Delete merged branches (or turn on "Automatically delete head branches").
 
 ## Licence
 

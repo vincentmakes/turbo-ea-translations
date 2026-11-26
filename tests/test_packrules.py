@@ -69,6 +69,11 @@ class ChangedFiles(unittest.TestCase):
         v = packrules.classify_changes([{"filename": "packs/pt-BR/pack.json", "status": "modified"}], 1)
         self.assertEqual((v.kind, v.code), ("contribution", "pt-BR"))
 
+    def test_maintainers_or_docs_only_is_for_the_owner(self):
+        for name in ("packs/nl/MAINTAINERS", "packs/README.md", "index.json"):
+            v = packrules.classify_changes([{"filename": name, "status": "modified"}], 1)
+            self.assertEqual(v.kind, "other", name)
+
     def test_not_about_packs(self):
         v = packrules.classify_changes([{"filename": ".github/workflows/judge.yml", "status": "modified"}], 1)
         self.assertEqual(v.kind, "other")
@@ -81,8 +86,7 @@ class ChangedFiles(unittest.TestCase):
              {"filename": ".github/workflows/judge.yml", "status": "modified"}],
             [{"filename": "packs/nl/pack.json", "status": "added"},
              {"filename": "packs/nl/MAINTAINERS", "status": "added"}],
-            [{"filename": "packs/nl/MAINTAINERS", "status": "added"}],
-            [{"filename": "index.json", "status": "modified"}, {"filename": "packs/x", "status": "added"}],
+            [{"filename": "index.json", "status": "modified"}, {"filename": "packs/x/pack.json", "status": "added"}],
             [{"filename": "packs/../x/pack.json", "status": "added"}],
             [{"filename": "packs/nl/../../.github/pack.json", "status": "added"}],
             [{"filename": "packs/nl/sub/pack.json", "status": "added"}],
@@ -113,9 +117,11 @@ class ReadingPacks(unittest.TestCase):
         pack = packrules.parse_pack_bytes(data)
         self.assertEqual(packrules.header_problems(pack, "nl"), [])
 
-    def test_bom_is_tolerated(self):
-        data = "﻿".encode() + json.dumps(good_pack()).encode()
-        self.assertEqual(packrules.parse_pack_bytes(data)["mode"], "share")
+    def test_bom_is_refused(self):
+        # turbo-ea's validator cannot read a file with a BOM either.
+        data = "\ufeff".encode() + json.dumps(good_pack()).encode()
+        with self.assertRaisesRegex(packrules.PackError, "byte-order mark"):
+            packrules.parse_pack_bytes(data)
 
     def test_size_cap(self):
         with self.assertRaises(packrules.PackError):
@@ -146,6 +152,19 @@ class ReadingPacks(unittest.TestCase):
         self.assertTrue(problems(mode="missing"))
         self.assertTrue(problems(format_version=2))
         self.assertTrue(problems(format_version=True))
+        self.assertTrue(problems(format_version=1.0))
+        self.assertTrue(problems(instructions="See https://evil.example"))
+        self.assertTrue(problems(instructions="<img src=x>"))
+        self.assertTrue(problems(instructions="x" * 2001))
+        self.assertTrue(problems(locale={"code": "nl", "name": "www.evil.example", "english_name": "Dutch",
+                                         "rtl": False}))
+        self.assertTrue(problems(locale={"code": "nl", "name": "<b>NL", "english_name": "Dutch", "rtl": False}))
+        self.assertTrue(problems(strings={"metamodel": {f"type.T{i}.label": "x"
+                                                        for i in range(packrules.MAX_METAMODEL_KEYS + 1)}}))
+        self.assertTrue(problems(strings={f"ns{i}": {} for i in range(packrules.MAX_NAMESPACES + 1)}))
+        many = packrules.header_problems(good_pack(source_hashes={f"n{i}": "x" for i in range(40)},
+                                                   strings={f"n{i}": "x" for i in range(40)}), "nl")
+        self.assertLessEqual(len(many), packrules.MAX_PROBLEMS + 1)
         self.assertTrue(problems(app_version="v2.214.0"))
         self.assertTrue(problems(app_version="2.214.0; curl evil"))
         self.assertTrue(problems(extra="x"))
@@ -154,7 +173,7 @@ class ReadingPacks(unittest.TestCase):
         self.assertTrue(problems(source_hashes={"common": {"a": "not-a-hash"}}))
         self.assertTrue(problems(locale={"code": "fy", "name": "Frysk", "english_name": "Frisian", "rtl": False}))
         self.assertTrue(problems(locale={"code": "de", "name": "Deutsch", "english_name": "German", "rtl": False}))
-        self.assertTrue(problems(locale={"code": "nl", "name": "Ned‮erlands", "english_name": "Dutch", "rtl": False}))
+        self.assertTrue(problems(locale={"code": "nl", "name": "Ned\u202eerlands", "english_name": "Dutch", "rtl": False}))
         self.assertTrue(problems(locale={"code": "nl", "name": "Nederlands", "english_name": "Dutch;", "rtl": False}))
         self.assertTrue(problems(locale={"code": "nl", "name": "Nederlands", "english_name": "Dutch", "rtl": "no"}))
         self.assertTrue(problems(locale={"code": "nl", "name": "\n", "english_name": "Dutch", "rtl": False}))
@@ -164,27 +183,29 @@ class ReadingPacks(unittest.TestCase):
 
 
 M = packrules.Maintainer
-IDS = {"alice": 1, "bob": 2, "zed": 26, "mallory": 13}
+IDS = {"alice": 1, "bob": 2, "zed": 26, "mallory": 13, "owner": 99}
 
 
 class Maintainers(unittest.TestCase):
     def test_parse(self):
-        text = ("# comment\nalice 1\n\n@Bob  # trailing\nalice\nnot a login\n$(id)\ncarol-x 33\n"
-                "dave 1x\neve 1 2\nfrank ١٢\n")
-        self.assertEqual(packrules.parse_maintainers(text), [M("alice", 1), M("Bob"), M("carol-x", 33)])
+        text = ("# comment\nalice 1\n\n@Bob 2 # trailing\nalice 1\nnot a login\n$(id) 3\ncarol-x 33\n"
+                "dave 1x\neve 1 2\nfrank ١٢\nidless\nzero 0\n")
+        maintainers, ignored = packrules.parse_maintainers(text)
+        self.assertEqual(maintainers, [M("alice", 1), M("Bob", 2), M("carol-x", 33)])
+        self.assertEqual(ignored, 7)
 
     def test_file_roundtrip(self):
         text = packrules.maintainers_file("nl", "alice", 1)
-        self.assertEqual(packrules.parse_maintainers(text), [M("alice", 1)])
-        for args in (("nl", "a;b", 1), ("../x", "alice", 1), ("nl", "alice", None), ("nl", "alice", "1")):
+        self.assertEqual(packrules.parse_maintainers(text), ([M("alice", 1)], 0))
+        for args in (("nl", "a;b", 1), ("../x", "alice", 1), ("nl", "alice", None), ("nl", "alice", "1"),
+                     ("nl", "alice", True), ("nl", "alice", 0)):
             with self.assertRaises(ValueError):
                 packrules.maintainers_file(*args)
 
-    def test_id_pins_the_account(self):
-        self.assertTrue(M("alice", 1).is_user("Alice", 1))
-        self.assertFalse(M("alice", 1).is_user("alice", 999))  # renamed login re-registered
-        self.assertTrue(M("alice").is_user("alice", 999))
-        self.assertFalse(M("alice").is_user("alicex", 1))
+    def test_id_is_the_identity(self):
+        self.assertTrue(M("alice", 1).is_user(1))  # whatever the login is now
+        self.assertFalse(M("alice", 1).is_user(999))  # a re-registered "alice"
+        self.assertFalse(M("alice", 1).is_user(True))
 
 
 def review(login, state, commit=HEAD, user_id=None):
@@ -194,7 +215,7 @@ def review(login, state, commit=HEAD, user_id=None):
 class Decide(unittest.TestCase):
     def d(self, **kw):
         args = dict(author="zed", author_id=26, head_owner=None, language_exists=True,
-                    maintainers=[M("alice", 1), M("bob", 2)], reviews=[], head_sha=HEAD)
+                    maintainers=[M("alice", 1), M("bob", 2)], reviews=[], head_sha=HEAD, owner_id=None)
         args.update(kw)
         if args["head_owner"] is None:
             args["head_owner"] = args["author"]
@@ -207,13 +228,17 @@ class Decide(unittest.TestCase):
     def test_new_language_from_someone_elses_branch_waits(self):
         self.assertEqual(self.d(language_exists=False, maintainers=[], head_owner="mallory").action, "wait")
 
-    def test_bad_author_login(self):
+    def test_bad_author(self):
         self.assertEqual(self.d(author="evil[bot]", language_exists=False).action, "skip")
         self.assertEqual(self.d(author="a;rm -rf /").action, "skip")
         self.assertEqual(self.d(author_id=None, language_exists=False).action, "skip")
+        self.assertEqual(self.d(author_id=True, language_exists=False).action, "skip")
 
     def test_maintainer_author_merges(self):
-        self.assertEqual(self.d(author="Alice", author_id=1).action, "merge")
+        self.assertEqual(self.d(author="alice", author_id=1).action, "merge")
+
+    def test_renamed_maintainer_keeps_role(self):
+        self.assertEqual(self.d(author="alice-renamed", author_id=1).action, "merge")
 
     def test_reused_login_is_not_the_maintainer(self):
         self.assertEqual(self.d(author="alice", author_id=999).action, "wait")
@@ -224,11 +249,22 @@ class Decide(unittest.TestCase):
         decision = self.d(author="alice", author_id=1, head_owner="mallory", reviews=[review("bob", "APPROVED")])
         self.assertEqual(decision.action, "merge")
 
-    def test_other_author_waits(self):
-        self.assertEqual(self.d().action, "wait")
+    def test_maintainer_own_pr_merges_despite_co_maintainer_objection(self):
+        decision = self.d(author="alice", author_id=1, reviews=[review("bob", "CHANGES_REQUESTED")])
+        self.assertEqual(decision.action, "merge")
 
-    def test_no_maintainers_waits(self):
+    def test_other_author_waits_and_names_maintainers(self):
+        decision = self.d()
+        self.assertEqual(decision.action, "wait")
+        self.assertIn("alice", decision.reason)
+
+    def test_no_maintainers_waits_for_owner(self):
         self.assertEqual(self.d(maintainers=[], reviews=[review("alice", "APPROVED")]).action, "wait")
+        self.assertEqual(self.d(maintainers=[], owner_id=99, reviews=[review("owner", "APPROVED")]).action,
+                         "merge")
+
+    def test_owner_is_an_implicit_maintainer(self):
+        self.assertEqual(self.d(author="owner", author_id=99, owner_id=99).action, "merge")
 
     def test_maintainer_approval_merges(self):
         self.assertEqual(self.d(reviews=[review("bob", "APPROVED")]).action, "merge")
@@ -258,6 +294,29 @@ class Decide(unittest.TestCase):
     def test_malformed_reviews_ignored(self):
         reviews = [{"user": None, "state": "APPROVED"}, {"state": "APPROVED"}, review("bob", "APPROVED")]
         self.assertEqual(self.d(reviews=reviews).action, "merge")
+
+
+class History(unittest.TestCase):
+    def test_linear(self):
+        commits = [{"parents": [{"sha": "1"}]}, {"parents": [{"sha": "2"}]}]
+        self.assertIsNone(packrules.history_problem({"total_commits": 2, "commits": commits}))
+
+    def test_refused(self):
+        merge = [{"parents": [{"sha": "1"}, {"sha": "2"}]}]
+        self.assertIn("merge commit", packrules.history_problem({"total_commits": 1, "commits": merge}))
+        root = [{"parents": []}]
+        self.assertTrue(packrules.history_problem({"total_commits": 1, "commits": root}))
+        self.assertTrue(packrules.history_problem({"total_commits": 3, "commits": [{"parents": [{}]}]}))
+        self.assertTrue(packrules.history_problem({"total_commits": 101, "commits": [{"parents": [{}]}] * 101}))
+        self.assertTrue(packrules.history_problem({}))
+
+    def test_differing_entries(self):
+        a = [{"path": "x", "mode": "100644", "type": "blob", "sha": "1"},
+             {"path": "y", "mode": "100644", "type": "blob", "sha": "2"}]
+        b = [{"path": "x", "mode": "100755", "type": "blob", "sha": "1"},
+             {"path": "z", "mode": "100644", "type": "blob", "sha": "3"}]
+        self.assertEqual(packrules.differing_entries(a, b), {"x", "y", "z"})
+        self.assertEqual(packrules.differing_entries(a, a), set())
 
 
 class Stats(unittest.TestCase):

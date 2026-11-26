@@ -57,22 +57,30 @@ Rules for the pull request — the check enforces them:
   the repository owner. A pull request that changes anything else is never
   merged automatically.
 * The folder name equals the `locale.code` inside the file.
-* At most 5 MB, a regular file (no symlink).
+* At most 3 MB, a regular file (no symlink).
 * One language per pull request.
+* **No merge commits** in the pull request. If you need to bring your branch up
+  to date, rebase it (or start a new pull request from the current version);
+  GitHub's "Update branch" button creates a merge commit, which the check
+  refuses. Pull requests made in the web interface never have one.
 
 ## 4. What the check verifies
 
 The **Pack check** runs on every pull request. It never runs anything from your
 pull request; it reads your file as data. It checks:
 
-* the file list (rules above), and that the file is a regular file under 5 MB;
-* the file is UTF-8 JSON, an object, not nested more than 8 levels, with no
-  duplicate keys;
+* the file list and the commits (rules above), and that the file is a regular
+  file of at most 3 MB;
+* the file is UTF-8 JSON without a byte-order mark, an object, not nested more
+  than 8 levels, with no duplicate keys;
 * the header: `"format": "turbo-ea-language-pack"`, `"format_version": 1`,
-  `"mode": "share"`, `app_version` a plain version (`2.214.0`), the language
-  code (valid, not built-in, equal to the folder), the native name (one line,
-  at most 60 characters), the English name (letters, spaces, brackets, dashes),
-  `rtl` true or false, and `source_hashes` made of 12-character hashes;
+  `"mode": "share"`, `app_version` a plain version (`2.214.0`) that is a Turbo
+  EA release or newer than the latest one, the language code (valid, not
+  built-in, equal to the folder), the native name (one line, at most 60
+  characters, no markup or links), the English name (letters, spaces, brackets,
+  dashes), `rtl` true or false, `instructions` plain text (no markup or links),
+  `source_hashes` made of 12-character hashes, and at most 5000 `metamodel`
+  labels;
 * then **Turbo EA's own validator** (`language_pack.py`, the same code the app
   runs on import, taken from the latest Turbo EA release) against the English
   text of the Turbo EA version your pack was exported from (the release tag of
@@ -90,8 +98,13 @@ pull request; it reads your file as data. It checks:
 | `markup_not_in_source` | a tag (`<b>`, `<1>` …) the English text does not have |
 | `url_not_in_source` | a link the English text does not have |
 | `control_chars` | an invisible control character or a bidi override |
-| `not_a_string` / `bad_key` | the file was edited into an invalid shape |
+| `not_a_string` / `bad_key` / `not_an_object` | the file was edited into an invalid shape |
+| `not_a_language_pack` | the file is not a language-pack export at all |
+| `no_strings` | the file has no `strings` section |
 | `invalid_code`, `invalid_english_name`, `bad_source_hashes`, `bad_format_version` | header problems |
+
+If the check says the validator **could not run**, that is not a verdict on your
+pack: the file could not be read, or Turbo EA's validator could not be fetched.
 
 Open the check's **Details** to see the report in the job summary. Fix the
 strings in Turbo EA, export again and push the new file to the same pull request
@@ -116,23 +129,32 @@ turbo-ea checkout instead.
 
 Nobody from the Turbo EA project reviews packs. Instead:
 
-* **New language:** once the check passes, the pull request merges
-  automatically, and **you become the language's maintainer**: your GitHub login
-  and numeric user id are written to `packs/<code>/MAINTAINERS` (the id keeps
-  the role with your account even if a login is renamed and re-registered).
-* **Update from a maintainer:** merges automatically once the check passes.
+* **New language:** once the check passes, **you become the language's
+  maintainer** — your GitHub login and numeric user id are written to
+  `packs/<code>/MAINTAINERS` — and the pull request merges automatically. The
+  id is what counts: if you rename your account you stay the maintainer, and
+  someone who later registers your old login does not become one.
+* **Update from a maintainer:** merges automatically once the check passes —
+  even if a co-maintainer asked for changes (maintainers are peers; sort it out
+  between you, or ask the repository owner).
 * Both need the pull request to come from a branch in **your own fork** —
   which is what the web interface does for you. A pull request from a branch
   someone else owns waits for a maintainer's approval instead (or, for a new
   language, for the repository owner).
 * **Update from anyone else:** waits until one of the language's maintainers
   submits an **approving review** of the latest commit. It then merges
-  automatically (usually within minutes; at the latest at the daily sweep).
+  automatically (usually within minutes; otherwise at a daily sweep, which
+  reaches every open pull request within a few days however many there are).
   A maintainer's "Request changes" blocks it until they approve. If you push new
   commits, an earlier approval no longer counts — the new version needs one.
+  The check's summary names the maintainers to ask; mention them in a comment.
+* The repository owner counts as a maintainer of every language: their approval
+  also merges a pull request.
+* **Limits:** at most 10 automatic merges per author and 5 per language in 24
+  hours; beyond that a pull request waits and is merged by a later run.
 * If the pack changed on the default branch after you opened your pull request,
-  it is not merged automatically: update your branch (or open a new pull
-  request from the current version) so the check runs on exactly what would be
+  it is not merged automatically: rebase your branch on the current version (or
+  open a new pull request from it) so the check runs on exactly what would be
   merged.
 
 If the check passes but nothing happens, the check's job summary says what the
@@ -140,8 +162,10 @@ pull request is waiting for.
 
 **Maintainers:** please review pull requests for your language — you are the
 only reviewers it has. To add a co-maintainer, or to hand the language over,
-open an issue or a pull request changing `packs/<code>/MAINTAINERS`; the
-repository owner merges those by hand. If a language has no maintainer left,
+open an issue or a pull request changing `packs/<code>/MAINTAINERS` (one
+`login user-id` per line; `https://api.github.com/users/<login>` shows the id —
+a line without an id is ignored). The repository owner merges those by hand;
+they are never merged automatically. If a language has no maintainer left,
 changes to it wait for the repository owner.
 
 ## 6. Licence

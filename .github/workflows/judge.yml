@@ -19,6 +19,10 @@
 #   only, never to the step that runs turbo-ea's validator. Only `merge` can
 #   write, it runs only after `validate` succeeded for this same head SHA, and
 #   it re-checks the live PR head before merging that exact SHA.
+# * A contribution's commits must form a straight line (no merge commit), so
+#   the head has a single merge base and the reviewed diff is what the squash
+#   applies; after merging, the merge commit is checked to differ from its
+#   parent in packs/<code>/pack.json only.
 # * The validator is always the one of the latest turbo-ea release (else
 #   main); the pack's app_version only selects which English text it is
 #   compared with, so a pack cannot pick an older, more lenient validator.
@@ -89,8 +93,9 @@ jobs:
     timeout-minutes: 10
     # One merge at a time in the whole repository, so each one re-reads the
     # default branch after the previous merge (the "pack changed since this PR
-    # branched" check then sees it) and the same PR is never merged twice. A
-    # run that gets cancelled while pending is picked up by the daily sweep.
+    # branched" check then sees it) and the same PR is never merged twice.
+    # GitHub keeps only one job pending per group: a third queued merge cancels
+    # the second, which the daily sweep (or the next event) then picks up.
     concurrency:
       group: merge-default-branch
       cancel-in-progress: false

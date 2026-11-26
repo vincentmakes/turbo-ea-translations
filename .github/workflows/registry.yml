@@ -2,7 +2,8 @@
 #
 # Started by judge.yml after every automatic merge (workflow_dispatch: merges
 # made with the workflow token do not trigger `push` workflows), by pushes to
-# packs/ (the owner merging or editing by hand) and by hand.
+# packs/ (the owner merging or editing by hand), by hand, and once a day so a
+# failed dispatch never leaves the index stale for long.
 #
 # Runs only on the default branch's own content: the packs there were validated
 # before they merged, and are still read as data only (regular files, size and
@@ -15,6 +16,8 @@ on:
     branches: [main]
     paths: ["packs/**"]
   workflow_dispatch:
+  schedule:
+    - cron: "41 5 * * *"
 
 permissions: {}
 
@@ -24,7 +27,11 @@ concurrency:
 
 jobs:
   index:
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # Scheduled runs always use the default branch (and their payload may not
+    # name the repository); other events must be on it.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

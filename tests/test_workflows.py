@@ -2,6 +2,7 @@
 
 * no `${{ … }}` expression inside a `run:` script (values go through `env:`);
 * every workflow starts from `permissions: {}` or read-only `contents: read`;
+* only the jobs that must write can, and the validator step holds no token;
 * every `uses:` is a local workflow or pinned to a full commit SHA;
 * no `secrets: inherit`, no cache/artifact actions, no checkout of a PR ref.
 """
@@ -13,30 +14,99 @@ from pathlib import Path
 WORKFLOWS = sorted((Path(__file__).resolve().parent.parent / ".github" / "workflows").glob("*.yml"))
 
 
+def indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
 def run_blocks(text: str):
-    """Yield (line number, script text) of every `run:` value."""
+    """Yield ``(line number, script text)`` of every ``run:`` value, inline or
+    block scalar (``|``, ``>-`` …). A block's content is every following line
+    indented deeper than the ``run`` key itself (blank lines included)."""
     lines = text.splitlines()
-    i = 0
-    while i < len(lines):
-        m = re.match(r"^(\s*)(?:-\s+)?run:\s*(.*)$", lines[i])
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*(?:-\s+)?)run:\s*(.*)$", line)
         if not m:
-            i += 1
             continue
-        indent = len(m.group(1))
+        key_col = len(m.group(1))  # column of "run", after any "- "
         rest = m.group(2)
-        start = i + 1
-        body = [] if rest in ("|", ">", "|-", ">-", "|+", ">+") else [rest]
-        i += 1
-        while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent + 2):
-            body.append(lines[i])
-            i += 1
-        yield start, "\n".join(body)
+        body = [] if re.fullmatch(r"[|>][+-]?", rest) else [rest]
+        j = i + 1
+        while j < len(lines) and (not lines[j].strip() or indent_of(lines[j]) > key_col):
+            body.append(lines[j])
+            j += 1
+        yield i + 1, "\n".join(body)
+
+
+def blocks(text: str, indent: int):
+    """``{key: text}`` of the mapping entries at exactly ``indent`` spaces
+    (jobs under ``jobs:`` are at 2), each with everything nested under it."""
+    out, key, buf = {}, None, []
+    for line in text.splitlines():
+        m = re.match(rf"^ {{{indent}}}([A-Za-z0-9_-]+):", line)
+        if m:
+            if key:
+                out[key] = "\n".join(buf)
+            key, buf = m.group(1), [line]
+        elif key is not None and line.strip() and indent_of(line) <= indent - 1:
+            out[key] = "\n".join(buf)
+            key, buf = None, []
+        elif key is not None:
+            buf.append(line)
+    if key:
+        out[key] = "\n".join(buf)
+    return out
+
+
+def jobs(text: str):
+    return blocks(re.split(r"^jobs:\n", text, maxsplit=1, flags=re.M)[1], 2)
+
+
+def steps(job_text: str):
+    parts = re.split(r"\n\s+- (?=name:|run:|uses:)", job_text)
+    return parts[1:]
+
+
+class Scanner(unittest.TestCase):
+    """The scanner itself must catch what it is for."""
+
+    HOSTILE = """jobs:
+  x:
+    steps:
+      - name: a
+        run: |
+          echo ok
+          echo "${{ github.event.pull_request.title }}"
+      - run: >-
+          echo "${{ github.head_ref }}"
+      - name: b
+        run: echo ${{ github.event.issue.title }}
+"""
+
+    def test_catches_expressions_in_every_run_form(self):
+        found = [script for _, script in run_blocks(self.HOSTILE) if "${{" in script]
+        self.assertEqual(len(found), 3)
+
+    def test_does_not_overrun_into_next_step(self):
+        scripts = [s for _, s in run_blocks("    steps:\n      - run: |\n          a\n      - name: n\n"
+                                            "        env:\n          X: ${{ github.sha }}\n")]
+        self.assertEqual(scripts, ["          a"])
+
+    def test_jobs_and_steps(self):
+        js = jobs(self.HOSTILE)
+        self.assertEqual(list(js), ["x"])
+        self.assertEqual(len(steps(js["x"])), 3)
 
 
 class Workflows(unittest.TestCase):
     def test_found(self):
         names = {p.name for p in WORKFLOWS}
-        self.assertTrue({"judge.yml", "pack-check.yml", "sweep.yml", "registry.yml"} <= names)
+        self.assertTrue({"judge.yml", "pack-check.yml", "sweep.yml", "registry.yml", "review-relay.yml",
+                         "tests.yml"} <= names)
+
+    def test_run_scripts_are_actually_scanned(self):
+        text = (WORKFLOWS[0].parent / "judge.yml").read_text()
+        scripts = [s for _, s in run_blocks(text)]
+        self.assertTrue(any("git init" in s and "checkout" in s for s in scripts))
 
     def test_no_expressions_in_run_scripts(self):
         for path in WORKFLOWS:
@@ -64,7 +134,8 @@ class Workflows(unittest.TestCase):
             text = path.read_text()
             for pattern in ("secrets: inherit", "actions/cache", "upload-artifact", "download-artifact",
                             "head.ref", "head_ref", "refs/pull/", "github.event.pull_request.title",
-                            "github.event.pull_request.body", "github.event.comment", "persist-credentials: true"):
+                            "github.event.pull_request.body", "github.event.comment", "persist-credentials: true",
+                            "secrets."):
                 self.assertNotIn(pattern, text, f"{path.name}: {pattern}")
 
     def test_privileged_triggers_explain_themselves(self):
@@ -74,12 +145,31 @@ class Workflows(unittest.TestCase):
                 self.assertTrue(text.startswith("#"), f"{path.name}: explain why the trigger is safe at the top")
                 self.assertRegex(text, r"(?i)safe")
 
-    def test_only_judge_merge_and_registry_write(self):
+    def test_write_permissions_per_job(self):
+        """Exactly these jobs may hold a write permission."""
+        allowed = {("judge.yml", "merge"), ("registry.yml", "index"),
+                   ("pack-check.yml", "judge"), ("sweep.yml", "judge")}  # callers: cap for judge.yml
         for path in WORKFLOWS:
-            text = path.read_text()
-            if path.name in ("judge.yml", "registry.yml", "pack-check.yml", "sweep.yml"):
-                continue
-            self.assertNotRegex(text, r":\s*write", path.name)
+            for name, job in jobs(path.read_text()).items():
+                if (path.name, name) not in allowed:
+                    self.assertNotRegex(job, r":\s*write", f"{path.name} job {name} must not write")
+
+    def test_validate_job_is_read_only_and_validator_step_has_no_token(self):
+        js = jobs((WORKFLOWS[0].parent / "judge.yml").read_text())
+        self.assertNotRegex(js["validate"], r":\s*write")
+        validator_steps = [s for s in steps(js["validate"]) if "judge.py\" validate" in s]
+        self.assertEqual(len(validator_steps), 1)
+        for forbidden in ("GH_TOKEN", "GITHUB_TOKEN", "github.token", "secrets"):
+            self.assertNotIn(forbidden, validator_steps[0])
+
+    def test_only_api_steps_get_the_token(self):
+        for path in WORKFLOWS:
+            for name, job in jobs(path.read_text()).items():
+                for step in steps(job):
+                    if "github.token" in step:
+                        self.assertNotIn("git -C", step, f"{path.name}/{name}: a git step holds the token")
+                        self.assertRegex(step, r"judge\.py\" (inspect|resolve|merge)|build_index\.py\" publish",
+                                         f"{path.name}/{name}: unexpected step with the token")
 
 
 if __name__ == "__main__":

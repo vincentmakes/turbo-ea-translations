@@ -3,7 +3,9 @@
 # * workflow_run of "Review relay": a review was submitted or dismissed — judge
 #   the open PR(s) whose head is that run's head SHA (a maintainer approval is
 #   what merges a change to an existing language);
-# * schedule: once a day, every open PR (catches anything an event missed);
+# * schedule: once a day, a window of up to 100 open PRs that moves every day,
+#   so every PR is reached however many are open (catches missed events and
+#   merge jobs cancelled while queued);
 # * workflow_dispatch: one PR, started by the owner.
 #
 # Why this is safe: workflow_run, schedule and workflow_dispatch all run the
@@ -31,9 +33,14 @@ jobs:
   resolve:
     # workflow_run matches workflows by name; a fork could add its own
     # "Review relay". Only the real file counts (it would only cost a re-judge).
+    # A manual run only from the default branch: anyone who can dispatch (write
+    # access) could otherwise run a branch's own version of these files.
     if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.path == '.github/workflows/review-relay.yml' &&
+      (github.event_name == 'schedule') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.path == '.github/workflows/review-relay.yml' &&
        github.event.workflow_run.event == 'pull_request_review')
     runs-on: ubuntu-24.04
     timeout-minutes: 5

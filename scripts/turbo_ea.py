@@ -118,6 +118,13 @@ def prepare(app_version: str, work: Path, pinned_sha: str = "") -> dict[str, obj
         return {"validator_label": label, "validator_sha": sha, "validator": validator,
                 "english_label": label, "english_sha": sha, "english": english}
     english_label, english_sha = resolve(app_version)
+    release = latest_release(_git("ls-remote", "--tags", REPO_URL, "refs/tags/v*"))
+    if english_label == "main" and release is not None:
+        newest = tuple(int(p) for p in release[0][1:].split("."))
+        if tuple(int(p) for p in app_version.split(".")) <= newest:
+            raise RuntimeError(
+                f"app_version {app_version} is not a turbo-ea release and not newer than {release[0]}"
+            )
     fetched: dict[str, Path] = {}
 
     def checkout(sha: str) -> Path:
@@ -127,7 +134,6 @@ def prepare(app_version: str, work: Path, pinned_sha: str = "") -> dict[str, obj
         return fetched[sha]
 
     candidates: list[tuple[str, str]] = []
-    release = latest_release(_git("ls-remote", "--tags", REPO_URL, "refs/tags/v*"))
     if release is not None:
         candidates.append(release)
     main = parse_ls_remote(_git("ls-remote", REPO_URL, "refs/heads/main")).get("refs/heads/main")

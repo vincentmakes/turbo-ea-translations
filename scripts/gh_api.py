@@ -22,6 +22,19 @@ API = "https://api.github.com"
 _REPO = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
 
 
+class _SameHostRedirects(urllib.request.HTTPRedirectHandler):
+    """urllib copies the Authorization header onto a redirected request; a
+    redirect away from api.github.com would hand the token to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(req.full_url).netloc:
+            raise urllib.error.HTTPError(newurl, code, "refusing a cross-host redirect", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_SameHostRedirects)
+
+
 class ApiError(RuntimeError):
     def __init__(self, status: int, message: str):
         super().__init__(f"GitHub API {status}: {message[:300]}")
@@ -72,7 +85,7 @@ class Client:
         for attempt in range(3):
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with _OPENER.open(req, timeout=60) as resp:
                     payload = resp.read()
                     if raw:
                         return payload
@@ -98,17 +111,23 @@ class Client:
         return self.request("GET", path, params=params or None)
 
     def paginate(self, path: str, limit: int = 1000, **params: Any) -> list[Any]:
+        return self.paginate_complete(path, limit, **params)[0]
+
+    def paginate_complete(self, path: str, limit: int = 1000, **params: Any) -> tuple[list[Any], bool]:
+        """``(items, complete)``: at most ``limit`` items, and whether that was
+        everything (a caller that must see all items fails closed on False)."""
         items: list[Any] = []
         page = 1
-        while len(items) < limit:
+        while True:
             batch = self.get(path, per_page=100, page=page, **params)
             if not isinstance(batch, list) or not batch:
-                break
+                return items, True
             items.extend(batch)
             if len(batch) < 100:
-                break
+                return items[:limit], len(items) <= limit
+            if len(items) >= limit:
+                return items[:limit], False
             page += 1
-        return items[:limit]
 
     # -- repository helpers -------------------------------------------------
 
@@ -123,6 +142,25 @@ class Client:
 
     def branch_sha(self, branch: str) -> str:
         return self.get(self.r(f"/branches/{q(branch)}"))["commit"]["sha"]
+
+    def commit_parents(self, commit_sha: str) -> list[str]:
+        commit = self.get(self.r(f"/git/commits/{q(commit_sha)}"))
+        return [p.get("sha") for p in commit.get("parents") or []]
+
+    def tree_listing(self, commit_sha: str, path: str = "") -> list[dict[str, Any]] | None:
+        """The entries of the directory ``path`` ('' = root) in ``commit_sha``,
+        or ``None`` when there is no such directory."""
+        if path:
+            entry = self.tree_entry(commit_sha, path)
+            if entry is None or entry.get("type") != "tree":
+                return None
+            tree_sha = entry["sha"]
+        else:
+            tree_sha = self.get(self.r(f"/git/commits/{q(commit_sha)}"))["tree"]["sha"]
+        tree = self.get(self.r(f"/git/trees/{q(tree_sha)}"))
+        if tree.get("truncated"):
+            raise RuntimeError("tree listing truncated")
+        return list(tree.get("tree", []))
 
     def tree_entry(self, commit_sha: str, path: str) -> dict[str, Any] | None:
         """The git tree entry (``mode``, ``type``, ``sha``, ``size``) at ``path``

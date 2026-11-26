@@ -12,7 +12,9 @@ name: Pack check
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `edited` covers a PR retargeted to main (and re-judges on a title edit,
+    # which is harmless).
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     # pull_request_target runs the workflow file of the PR's BASE branch: only
     # main's (reviewed) definitions may ever run with a write token.
     branches: [main]
@@ -20,8 +22,8 @@ on:
 permissions: {}
 
 # One run per PR at a time. Never cancel a running one: it could be between
-# the merge and writing MAINTAINERS. A run for an outdated head simply stops
-# at its head-SHA check.
+# reserving MAINTAINERS and merging (harmless, the next run finishes it, but
+# pointless). A run for an outdated head simply stops at its head-SHA check.
 concurrency:
   group: pack-check-${{ github.event.pull_request.number }}
   cancel-in-progress: false

@@ -35,20 +35,22 @@ SOURCE_REPO = "vincentmakes/turbo-ea-translations"
 EnglishLoader = Callable[[str], "tuple[str, dict[str, dict[str, str]]] | None"]
 
 
-def last_update(repo: Path, rel: str) -> str | None:
-    """Commit date of the last commit touching ``rel``, as UTC
-    ``YYYY-MM-DDTHH:MM:SSZ`` — formatted here from the Unix timestamp, so it
-    depends on neither the committer's timezone nor the git version."""
+def last_update(repo: Path, rel: str) -> tuple[str | None, str | None]:
+    """``(date, commit)`` of the last commit touching ``rel``: the date as UTC
+    ``YYYY-MM-DDTHH:MM:SSZ`` (formatted here from the Unix timestamp, so it
+    depends on neither the committer's timezone nor the git version) and the
+    commit SHA (so the app can fetch exactly that version and tell a stale
+    index from a tampered file)."""
     try:
         out = subprocess.run(
-            ["git", "log", "-1", "--format=%ct", "--", rel],
+            ["git", "log", "-1", "--format=%ct %H", "--", rel],
             cwd=repo, capture_output=True, text=True, timeout=60, check=True,
-        ).stdout.strip()
+        ).stdout.split()
     except (OSError, subprocess.SubprocessError):
-        return None
-    if not out.isdigit():
-        return None
-    return datetime.fromtimestamp(int(out), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return None, None
+    if len(out) != 2 or not out[0].isdigit() or not packrules.is_sha(out[1]):
+        return None, None
+    return datetime.fromtimestamp(int(out[0]), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), out[1]
 
 
 def read_regular_file(path: Path, limit: int) -> bytes | None:
@@ -64,7 +66,7 @@ def read_regular_file(path: Path, limit: int) -> bytes | None:
 
 
 def build_entry(code: str, data: bytes, english: tuple[str, dict[str, dict[str, str]]] | None,
-                updated: str | None) -> dict[str, Any]:
+                updated: tuple[str | None, str | None]) -> dict[str, Any]:
     pack = packrules.parse_pack_bytes(data)
     problems = packrules.header_problems(pack, code)
     if problems:
@@ -79,7 +81,8 @@ def build_entry(code: str, data: bytes, english: tuple[str, dict[str, dict[str, 
         "path": f"packs/{code}/pack.json",
         "sha256": hashlib.sha256(data).hexdigest(),
         "size": len(data),
-        "updated": updated,
+        "updated": updated[0],
+        "commit": updated[1],
     }
     stats = packrules.pack_stats(pack, english[1] if english else None)
     if english:
